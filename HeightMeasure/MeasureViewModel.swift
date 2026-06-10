@@ -102,9 +102,18 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
 
     // MARK: - ステップ① 底点の捕捉（§5.1）
     private func captureBase(_ arView: ARView) {
-        let results = arView.raycast(from: arView.center,
+        // 平地前提: 検出済み水平面の無限延長を優先してレイキャストする。
+        // これにより、遠く・浅い角度（地平線近く）の「壁の根元」でも、スマホをほぼ
+        // 立てたまま十字を合わせるだけでヒットする。平面未確立時のフォールバックとして
+        // 推定平面（.estimatedPlane）も試す。
+        var results = arView.raycast(from: arView.center,
+                                     allowing: .existingPlaneInfinite,
+                                     alignment: .horizontal)
+        if results.isEmpty {
+            results = arView.raycast(from: arView.center,
                                      allowing: .estimatedPlane,
                                      alignment: .horizontal)
+        }
         guard let hit = results.first else {
             showError(messageFloorNotFound)
             return
