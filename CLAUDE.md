@@ -78,6 +78,13 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - 開発完了後は PR を作成し、ユーザーがテストして承認してからマージする。
 - マージ後はフィーチャーブランチを削除する（リモート・ローカル両方）。
 
+## セキュリティレビュー（push 前の必須ゲート）
+
+- **リモートへ push する前には必ずセキュリティレビューを実施する**。例外なく毎回行う。
+- 推奨は `security-guidance` プラグイン（`/plugin install security-guidance@claude-plugins-official`）。インストール済みなら `git commit` / `git push` 時にフックが自動でレビューを走らせる。
+- プラグイン未導入の環境では、代替として組み込みの `/security-review`（現在の差分のセキュリティレビュー）を push 前に実行する。
+- レビューで High / Medium の指摘が出た場合は、解消するか、対応方針を明記したうえでのみ push する。
+
 ## README の管理
 
 - `README.md`（日本語）および `README.en.md`（英語）は**常に本番環境の現状を反映**した状態を維持する。
