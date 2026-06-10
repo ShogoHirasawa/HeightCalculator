@@ -1,4 +1,13 @@
 import SwiftUI
+import UIKit
+
+/// 触覚フィードバック（§7.4）。床にロックした瞬間に軽いハプティクスを出す。
+enum Haptics {
+    @MainActor static func snap() {
+        let generator = UIImpactFeedbackGenerator(style: .soft)
+        generator.impactOccurred()
+    }
+}
 
 /// SwiftUI オーバーレイ（§7・§9）。Apple HIG 準拠の見た目（マテリアル背景・SF Symbols・
 /// カプセルボタン）で、レティクル・バナー・床ロックガイド・結果リスト・3 ボタンを描画する。
@@ -32,32 +41,36 @@ struct OverlayView: View {
         }
     }
 
-    // MARK: - レティクル
+    // MARK: - レティクル（純正「計測」アプリ風：白いリング＋中心点、ロック時にスナップ）
     private var reticle: some View {
-        ZStack {
+        let locked = (viewModel.state == .waitingBase && viewModel.reticleState == .locked)
+        return ZStack {
             Circle()
-                .stroke(reticleColor, lineWidth: 3)
-                .frame(width: 46, height: 46)
+                .stroke(Color.white, lineWidth: 2.5)
+                .frame(width: 32, height: 32)
             Circle()
-                .fill(reticleColor)
-                .frame(width: 6, height: 6)
+                .fill(Color.white)
+                .frame(width: locked ? 7 : 5, height: locked ? 7 : 5)
         }
-        .shadow(color: .black.opacity(0.35), radius: 2)
-        .animation(.easeInOut(duration: 0.15), value: reticleColor)
+        .opacity(reticleOpacity)
+        // ロック時はリングがキュッと縮む（Measure のスナップ挙動）。
+        .scaleEffect(locked ? 0.82 : 1.0)
+        .shadow(color: .black.opacity(0.4), radius: 2)
+        .animation(.spring(response: 0.25, dampingFraction: 0.55), value: locked)
+        .onChange(of: viewModel.reticleState) { _, newValue in
+            if newValue == .locked { Haptics.snap() }
+        }
     }
 
-    private var reticleColor: Color {
+    /// 状態に応じた不透明度。床を捉えていない探索中や初期化中はやや薄く。
+    private var reticleOpacity: Double {
         switch viewModel.state {
-        case .waitingBase:
-            switch viewModel.reticleState {
-            case .locked: return accent
-            case .approximate: return amber
-            case .off: return .white.opacity(0.7)
-            }
-        case .waitingTarget:
-            return .white
         case .initializing:
-            return .white.opacity(0.5)
+            return 0.5
+        case .waitingBase:
+            return viewModel.reticleState == .off ? 0.75 : 1.0
+        case .waitingTarget:
+            return 1.0
         }
     }
 
