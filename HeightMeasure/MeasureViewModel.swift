@@ -5,6 +5,16 @@ import UIKit
 import simd
 import Combine
 
+/// 底点選択中（.waitingBase）に、画面中央が床を捉えているかの状態（§7.4 ガイドUI）。
+/// - off: 床に当たっていない（壁・空中など）→ 計測ボタン無効
+/// - approximate: 推定平面・無限延長にのみ当たっている（遠方/未検出）→ おおよそ
+/// - locked: 実検出された床（.existingPlaneGeometry）に当たっている → 正確
+enum ReticleState {
+    case off
+    case approximate
+    case locked
+}
+
 /// 仕様書 §6・§5・§8 を担う ObservableObject 兼 ARSessionDelegate（§9）。
 @MainActor
 final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
@@ -16,6 +26,8 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published private(set) var errorMessage: String? = nil
     /// 直近に追加した行のハイライト対象（§7.3）。
     @Published private(set) var highlightedID: UUID? = nil
+    /// 床ロック状態（§7.4）。レティクル色・フロアプレビュー・計測ボタンの有効判定に使う。
+    @Published private(set) var reticleState: ReticleState = .off
 
     // MARK: - AR 参照・内部状態
     private weak var arView: ARView?
@@ -27,6 +39,12 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     private var nextIndex: Int = 1
     private var errorToken: Int = 0
     private var highlightToken: Int = 0
+    /// 床ロックのフロアプレビュー（§7.4）。十字が指す床位置に追従する平面マーカー。
+    private var previewEntity: ModelEntity?
+
+    // 床ロック色（§7.4）
+    private let colorLocked = UIColor(hex: 0x1D9E75)       // 正確（実検出の床）
+    private let colorApproximate = UIColor(hex: 0xF2A33D)  // おおよそ（推定/無限延長）
 
     // MARK: - エラー文言（§8）
     private let messageFloorNotFound = "床が検出できません。地面を映してから再度お試しください"
@@ -38,6 +56,20 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     func attach(arView: ARView) {
         self.arView = arView
         arView.session.delegateQueue = .main
+        setupPreviewMarker(in: arView)
+    }
+
+    /// フロアプレビュー（床に追従する平面マーカー）を1つだけ生成しておく（§7.4）。
+    private func setupPreviewMarker(in arView: ARView) {
+        let anchor = AnchorEntity(world: .zero)
+        let marker = ModelEntity(
+            mesh: .generatePlane(width: 0.09, depth: 0.09),
+            materials: [SimpleMaterial(color: colorApproximate, isMetallic: false)]
+        )
+        marker.isEnabled = false
+        anchor.addChild(marker)
+        arView.scene.addAnchor(anchor)
+        previewEntity = marker
     }
 
     // MARK: - ボタン操作
@@ -102,21 +134,25 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
 
     // MARK: - ステップ① 底点の捕捉（§5.1）
 
-    /// 画面中央から水平面へレイキャストする（§5.1）。精度優先の順で試し、最初に当たった結果を返す。
-    /// 1) `.existingPlaneGeometry`: 実検出された床の範囲内のみ。十字が指す“その場の床”に正確に当たる（屋内・近距離向け）。
-    /// 2) `.estimatedPlane`: 特徴点からの推定平面。床がまだ十分検出されていない箇所の保険。
-    /// 3) `.existingPlaneInfinite`: 検出済み水平面の無限延長。遠く・浅角の屋外の根元など最後の保険。
-    private func raycastFloor(_ arView: ARView) -> [ARRaycastResult] {
-        let targets: [ARRaycastQuery.Target] = [.existingPlaneGeometry, .estimatedPlane, .existingPlaneInfinite]
-        for target in targets {
-            let hits = arView.raycast(from: arView.center, allowing: target, alignment: .horizontal)
-            if !hits.isEmpty { return hits }
+    /// 画面中央から水平面へレイキャストする（§5.1）。精度優先の順で試し、最初に当たった結果と
+    /// それが「正確（実検出の床）」かどうかを返す。
+    /// 1) `.existingPlaneGeometry`: 実検出された床の範囲内のみ。十字が指す“その場の床”に正確に当たる（exact=true）。
+    /// 2) `.estimatedPlane`: 特徴点からの推定平面。床がまだ十分検出されていない箇所の保険（exact=false）。
+    /// 3) `.existingPlaneInfinite`: 検出済み水平面の無限延長。遠く・浅角の屋外の根元など最後の保険（exact=false）。
+    private func raycastFloor(_ arView: ARView) -> (hit: ARRaycastResult, exact: Bool)? {
+        if let hit = arView.raycast(from: arView.center, allowing: .existingPlaneGeometry, alignment: .horizontal).first {
+            return (hit, true)
         }
-        return []
+        for target: ARRaycastQuery.Target in [.estimatedPlane, .existingPlaneInfinite] {
+            if let hit = arView.raycast(from: arView.center, allowing: target, alignment: .horizontal).first {
+                return (hit, false)
+            }
+        }
+        return nil
     }
 
     private func captureBase(_ arView: ARView) {
-        guard let hit = raycastFloor(arView).first else {
+        guard let hit = raycastFloor(arView)?.hit else {
             showError(messageFloorNotFound)
             return
         }
@@ -125,6 +161,33 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         baseWorldPosition = base
         placeBaseMarker(at: base)
         state = .waitingTarget
+    }
+
+    // MARK: - 床ロックのフロアプレビュー更新（§7.4）
+    /// 毎フレーム、底点選択中（.waitingBase）のみ床へレイキャストし、レティクル状態と
+    /// プレビューマーカーの位置・色を更新する。
+    private func updateFloorPreview() {
+        guard state == .waitingBase, let arView else {
+            if reticleState != .off { reticleState = .off }
+            previewEntity?.isEnabled = false
+            return
+        }
+        guard let result = raycastFloor(arView) else {
+            if reticleState != .off { reticleState = .off }
+            previewEntity?.isEnabled = false
+            return
+        }
+        let t = result.hit.worldTransform
+        previewEntity?.position = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+        previewEntity?.isEnabled = true
+
+        let newState: ReticleState = result.exact ? .locked : .approximate
+        if newState != reticleState {
+            reticleState = newState
+            previewEntity?.model?.materials = [
+                SimpleMaterial(color: result.exact ? colorLocked : colorApproximate, isMetallic: false)
+            ]
+        }
     }
 
     // MARK: - ステップ② 対象の捕捉と高さ算出（§5.2）
@@ -217,6 +280,10 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         if anchors.contains(where: { $0 is ARPlaneAnchor }) {
             state = .waitingBase
         }
+    }
+
+    func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        updateFloorPreview()
     }
 }
 
