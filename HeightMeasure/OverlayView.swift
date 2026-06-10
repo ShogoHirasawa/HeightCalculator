@@ -74,28 +74,31 @@ struct OverlayView: View {
             if viewModel.state == .waitingTarget,
                let pb = viewModel.projectedBase,
                let top = viewModel.projectedReferenceTop {
+                // 有効時は終点まで、無効時（カメラ未上昇）はリファレンス上端まで線を引く。
+                let lineEnd = viewModel.projectedTarget ?? top
                 ZStack {
-                    // 鉛直リファレンス線（常時表示の点線）
-                    Path { p in p.move(to: pb); p.addLine(to: top) }
-                        .stroke(Color.white, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, dash: [2, 9]))
+                    // 鉛直線（純正Measure風：白い実線）
+                    Path { p in p.move(to: pb); p.addLine(to: lineEnd) }
+                        .stroke(Color.white, style: StrokeStyle(lineWidth: 3, lineCap: .round))
                         .shadow(color: .black.opacity(0.4), radius: 1)
 
                     // 角度が有効なときのみ、終点マーカー＋数値（鉛直線上の高さ H の点）
                     if let pt = viewModel.projectedTarget, let h = viewModel.liveHeightMeters {
                         Circle()
-                            .stroke(Color.white, lineWidth: 2.5)
+                            .stroke(Color.white, lineWidth: 3)
                             .frame(width: 22, height: 22)
-                            .background(Circle().fill(.white).frame(width: 5, height: 5))
+                            .background(Circle().fill(.white).frame(width: 6, height: 6))
                             .shadow(color: .black.opacity(0.4), radius: 2)
                             .position(pt)
+                        // 純正Measure風：白いピル＋濃い文字
                         Text(formatLive(h))
-                            .font(.caption.weight(.bold))
+                            .font(.footnote.weight(.semibold))
                             .monospacedDigit()
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 8)
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 9)
                             .padding(.vertical, 4)
-                            .background(.ultraThinMaterial, in: Capsule())
-                            .overlay(Capsule().stroke(accent, lineWidth: 1))
+                            .background(Capsule().fill(.white))
+                            .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
                             .position(CGPoint(x: (pb.x + pt.x) / 2, y: (pb.y + pt.y) / 2))
                     }
                 }
