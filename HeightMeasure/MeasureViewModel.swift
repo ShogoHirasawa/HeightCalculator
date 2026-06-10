@@ -101,20 +101,22 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     // MARK: - ステップ① 底点の捕捉（§5.1）
-    private func captureBase(_ arView: ARView) {
-        // 平地前提: 検出済み水平面の無限延長を優先してレイキャストする。
-        // これにより、遠く・浅い角度（地平線近く）の「壁の根元」でも、スマホをほぼ
-        // 立てたまま十字を合わせるだけでヒットする。平面未確立時のフォールバックとして
-        // 推定平面（.estimatedPlane）も試す。
-        var results = arView.raycast(from: arView.center,
-                                     allowing: .existingPlaneInfinite,
-                                     alignment: .horizontal)
-        if results.isEmpty {
-            results = arView.raycast(from: arView.center,
-                                     allowing: .estimatedPlane,
-                                     alignment: .horizontal)
+
+    /// 画面中央から水平面へレイキャストする（§5.1）。精度優先の順で試し、最初に当たった結果を返す。
+    /// 1) `.existingPlaneGeometry`: 実検出された床の範囲内のみ。十字が指す“その場の床”に正確に当たる（屋内・近距離向け）。
+    /// 2) `.estimatedPlane`: 特徴点からの推定平面。床がまだ十分検出されていない箇所の保険。
+    /// 3) `.existingPlaneInfinite`: 検出済み水平面の無限延長。遠く・浅角の屋外の根元など最後の保険。
+    private func raycastFloor(_ arView: ARView) -> [ARRaycastResult] {
+        let targets: [ARRaycastQuery.Target] = [.existingPlaneGeometry, .estimatedPlane, .existingPlaneInfinite]
+        for target in targets {
+            let hits = arView.raycast(from: arView.center, allowing: target, alignment: .horizontal)
+            if !hits.isEmpty { return hits }
         }
-        guard let hit = results.first else {
+        return []
+    }
+
+    private func captureBase(_ arView: ARView) {
+        guard let hit = raycastFloor(arView).first else {
             showError(messageFloorNotFound)
             return
         }
