@@ -22,7 +22,7 @@ Valid conditions: `f_h >= 0.05` (not aimed too close to straight up) and `fy > 0
 ## Features
 
 - Multiple measurements per session, accumulated in a numbered list at the bottom (newest on top).
-- **Floor-lock guidance**: while picking the base point (①), the floor spot under the reticle is shown in real time via a floor preview marker, reticle color, and a status chip. The measure button is enabled only when a floor is locked, preventing accidental selection of a wall.
+- **Floor-lock guidance**: while picking the base point (①), an Apple Measure-style reticle (a white ring in AR space) lies flat on the detected floor, showing the locked floor spot and its tilt in real time. The measure button is enabled only when a floor is locked, preventing accidental selection of a wall.
 - Redo (discard the last base point while in `.waitingTarget`).
 - Clear (remove all results and the AR markers/vertical lines, reset numbering).
 - Results are not persisted (discarded when the app exits).

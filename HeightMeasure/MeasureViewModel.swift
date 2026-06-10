@@ -39,12 +39,9 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     private var nextIndex: Int = 1
     private var errorToken: Int = 0
     private var highlightToken: Int = 0
-    /// 床ロックのフロアプレビュー（§7.4）。十字が指す床位置に追従する平面マーカー。
-    private var previewEntity: ModelEntity?
-
-    // 床ロック色（§7.4）
-    private let colorLocked = UIColor(hex: 0x1D9E75)       // 正確（実検出の床）
-    private let colorApproximate = UIColor(hex: 0xF2A33D)  // おおよそ（推定/無限延長）
+    /// 床に沿って配置するレティクル本体（§7.4）。白いリング＋中心点を、十字が指す床位置に
+    /// 置き、床面に寝かせて表示する（見る角度で楕円に傾く＝純正「計測」アプリ風）。
+    private var reticleEntity: Entity?
 
     // MARK: - エラー文言（§8）
     private let messageFloorNotFound = "床が検出できません。地面を映してから再度お試しください"
@@ -56,20 +53,59 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     func attach(arView: ARView) {
         self.arView = arView
         arView.session.delegateQueue = .main
-        setupPreviewMarker(in: arView)
+        setupReticleEntity(in: arView)
     }
 
-    /// フロアプレビュー（床に追従する平面マーカー）を1つだけ生成しておく（§7.4）。
-    private func setupPreviewMarker(in arView: ARView) {
+    /// 床に沿うレティクル（白いリング＋中心点）を1つだけ生成しておく（§7.4）。
+    private func setupReticleEntity(in arView: ARView) {
         let anchor = AnchorEntity(world: .zero)
-        let marker = ModelEntity(
-            mesh: .generatePlane(width: 0.09, depth: 0.09),
-            materials: [SimpleMaterial(color: colorApproximate, isMetallic: false)]
-        )
-        marker.isEnabled = false
-        anchor.addChild(marker)
+        let parent = Entity()
+
+        // 閉じたトーラス＋球なので、UnlitMaterial の白で表裏問わずリングとして見える。
+        let material = UnlitMaterial(color: .white)
+        let ring = ModelEntity(mesh: Self.makeRingMesh(), materials: [material])
+        let dot = ModelEntity(mesh: .generateSphere(radius: 0.004), materials: [material])
+        parent.addChild(ring)
+        parent.addChild(dot)
+        parent.isEnabled = false
+
+        anchor.addChild(parent)
         arView.scene.addAnchor(anchor)
-        previewEntity = marker
+        reticleEntity = parent
+    }
+
+    /// 床に寝かせて表示するリング（トーラス）メッシュを生成する。XZ平面に水平に作る。
+    private static func makeRingMesh(majorRadius R: Float = 0.045, tubeRadius r: Float = 0.0035,
+                                     majorSeg: Int = 48, minorSeg: Int = 10) -> MeshResource {
+        var positions: [SIMD3<Float>] = []
+        var normals: [SIMD3<Float>] = []
+        var indices: [UInt32] = []
+        for i in 0..<majorSeg {
+            let u = Float(i) / Float(majorSeg) * 2 * .pi
+            let cu = cos(u); let su = sin(u)
+            for j in 0..<minorSeg {
+                let v = Float(j) / Float(minorSeg) * 2 * .pi
+                let cv = cos(v); let sv = sin(v)
+                positions.append([(R + r * cv) * cu, r * sv, (R + r * cv) * su])
+                normals.append([cv * cu, sv, cv * su])
+            }
+        }
+        for i in 0..<majorSeg {
+            for j in 0..<minorSeg {
+                let i1 = (i + 1) % majorSeg
+                let j1 = (j + 1) % minorSeg
+                let a = UInt32(i * minorSeg + j)
+                let b = UInt32(i1 * minorSeg + j)
+                let c = UInt32(i1 * minorSeg + j1)
+                let d = UInt32(i * minorSeg + j1)
+                indices += [a, b, c, a, c, d]
+            }
+        }
+        var descriptor = MeshDescriptor(name: "reticleRing")
+        descriptor.positions = MeshBuffers.Positions(positions)
+        descriptor.normals = MeshBuffers.Normals(normals)
+        descriptor.primitives = .triangles(indices)
+        return (try? MeshResource.generate(from: [descriptor])) ?? .generateSphere(radius: R)
     }
 
     // MARK: - ボタン操作
@@ -163,31 +199,21 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         state = .waitingTarget
     }
 
-    // MARK: - 床ロックのフロアプレビュー更新（§7.4）
-    /// 毎フレーム、底点選択中（.waitingBase）のみ床へレイキャストし、レティクル状態と
-    /// プレビューマーカーの位置・色を更新する。
-    private func updateFloorPreview() {
-        guard state == .waitingBase, let arView else {
+    // MARK: - 床に沿うレティクルの更新（§7.4）
+    /// 毎フレーム、底点選択中（.waitingBase）のみ床へレイキャストし、レティクルを床位置へ移動・
+    /// 床面に沿って向ける。床に当たらなければ非表示にし、reticleState を更新する。
+    private func updateReticle() {
+        guard state == .waitingBase, let arView, let result = raycastFloor(arView) else {
             if reticleState != .off { reticleState = .off }
-            previewEntity?.isEnabled = false
+            reticleEntity?.isEnabled = false
             return
         }
-        guard let result = raycastFloor(arView) else {
-            if reticleState != .off { reticleState = .off }
-            previewEntity?.isEnabled = false
-            return
-        }
-        let t = result.hit.worldTransform
-        previewEntity?.position = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
-        previewEntity?.isEnabled = true
+        // 床面のワールド変換（位置＋向き）をそのまま適用し、面に寝かせて配置する。
+        reticleEntity?.transform = Transform(matrix: result.hit.worldTransform)
+        reticleEntity?.isEnabled = true
 
         let newState: ReticleState = result.exact ? .locked : .approximate
-        if newState != reticleState {
-            reticleState = newState
-            previewEntity?.model?.materials = [
-                SimpleMaterial(color: result.exact ? colorLocked : colorApproximate, isMetallic: false)
-            ]
-        }
+        if newState != reticleState { reticleState = newState }
     }
 
     // MARK: - ステップ② 対象の捕捉と高さ算出（§5.2）
@@ -283,7 +309,7 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        updateFloorPreview()
+        updateReticle()
     }
 }
 

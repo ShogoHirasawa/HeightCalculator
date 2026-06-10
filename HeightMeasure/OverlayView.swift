@@ -16,18 +16,15 @@ struct OverlayView: View {
 
     // 配色
     private let accent = Color(UIColor(hex: 0x1D9E75))       // アクセント緑
-    private let amber = Color(UIColor(hex: 0xF2A33D))        // おおよそ（黄）
     private let errorRed = Color(UIColor(hex: 0xA32D2D))     // エラー（§8）
     private let highlight = Color(UIColor(hex: 0xE1F5EE))    // 行ハイライト（§7.3）
 
     var body: some View {
         ZStack {
-            // 中央レティクル（§7.1-1 / §7.4）
-            reticle
-            // 床ロックのステータスチップ（§7.4）。底点選択中のみ、レティクル直下。
-            if viewModel.state == .waitingBase {
-                floorChip
-                    .offset(y: 52)
+            // 2Dレティクル（フォールバック）。床に沿うリングは AR 空間側（MeasureViewModel）で
+            // 描画するため、床に当たっている底点選択中は 2D を隠す。
+            if show2DReticle {
+                reticle
             }
 
             VStack(spacing: 0) {
@@ -39,27 +36,34 @@ struct OverlayView: View {
                 bottomBar
             }
         }
+        // 床にロックした瞬間に軽いハプティクス（§7.4）。状態変化を安定して拾うため最上位に付ける。
+        .onChange(of: viewModel.reticleState) { _, newValue in
+            if newValue == .locked { Haptics.snap() }
+        }
     }
 
-    // MARK: - レティクル（純正「計測」アプリ風：白いリング＋中心点、ロック時にスナップ）
+    /// 2Dレティクルを表示するか。底点選択中に床へ当たっている時だけ、AR の床リングに任せて隠す。
+    private var show2DReticle: Bool {
+        switch viewModel.state {
+        case .waitingBase:
+            return viewModel.reticleState == .off
+        case .waitingTarget, .initializing:
+            return true
+        }
+    }
+
+    // MARK: - 2Dレティクル（床非ヒット時・対象捕捉時のフォールバック）
     private var reticle: some View {
-        let locked = (viewModel.state == .waitingBase && viewModel.reticleState == .locked)
-        return ZStack {
+        ZStack {
             Circle()
                 .stroke(Color.white, lineWidth: 2.5)
                 .frame(width: 32, height: 32)
             Circle()
                 .fill(Color.white)
-                .frame(width: locked ? 7 : 5, height: locked ? 7 : 5)
+                .frame(width: 5, height: 5)
         }
         .opacity(reticleOpacity)
-        // ロック時はリングがキュッと縮む（Measure のスナップ挙動）。
-        .scaleEffect(locked ? 0.82 : 1.0)
         .shadow(color: .black.opacity(0.4), radius: 2)
-        .animation(.spring(response: 0.25, dampingFraction: 0.55), value: locked)
-        .onChange(of: viewModel.reticleState) { _, newValue in
-            if newValue == .locked { Haptics.snap() }
-        }
     }
 
     /// 状態に応じた不透明度。床を捉えていない探索中や初期化中はやや薄く。
@@ -68,34 +72,10 @@ struct OverlayView: View {
         case .initializing:
             return 0.5
         case .waitingBase:
-            return viewModel.reticleState == .off ? 0.75 : 1.0
+            return 0.75   // 床を探している（off）状態でのみ表示されるため薄め
         case .waitingTarget:
             return 1.0
         }
-    }
-
-    // MARK: - 床ロックチップ（§7.4）
-    private var floorChip: some View {
-        let (text, symbol, tint): (String, String, Color)
-        switch viewModel.reticleState {
-        case .locked:
-            (text, symbol, tint) = ("床にロック", "checkmark.circle.fill", accent)
-        case .approximate:
-            (text, symbol, tint) = ("おおよその床", "circle.dashed", amber)
-        case .off:
-            (text, symbol, tint) = ("床を探しています", "viewfinder", .white.opacity(0.9))
-        }
-        return HStack(spacing: 6) {
-            Image(systemName: symbol)
-            Text(text)
-        }
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(.white)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().stroke(tint, lineWidth: 1.5))
-        .shadow(color: .black.opacity(0.25), radius: 3, y: 1)
     }
 
     // MARK: - 上部バナー（§7.1-2 / §7.2 / §8）
