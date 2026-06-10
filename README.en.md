@@ -6,7 +6,7 @@ A minimal iOS AR prototype that measures the height (vertical distance from the 
 
 Aim the on-screen reticle and capture two points in order using the bottom measure button.
 
-1. **① Base of the wall (the ground directly below the target)** — raycast against the infinite extension of the detected horizontal plane (`.existingPlaneInfinite`, falling back to `.estimatedPlane` if empty) to fix the base point `B`. Assumes **flat, level ground**, so the far wall base can be captured while holding the phone nearly upright.
+1. **① Base of the wall (the ground directly below the target)** — raycast to a horizontal plane to fix the base point `B`. Accuracy-first order: `.existingPlaneGeometry` (the actually detected floor) → `.estimatedPlane` → `.existingPlaneInfinite` (infinite extension). Indoor/near targets land accurately; a far outdoor base is still captured via the infinite extension.
 2. **② Target (the point whose height you want)** — compute height `H` from the camera position `C` and forward vector `f` at that instant.
 
 Formula (§5.2):
