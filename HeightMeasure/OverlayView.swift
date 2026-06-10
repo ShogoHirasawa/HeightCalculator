@@ -53,65 +53,54 @@ struct OverlayView: View {
 
     /// 2Dレティクルを表示するか。
     /// - 底点選択中: 面へ乗っている時は AR の面リングに任せて隠す。
-    /// - 対象捕捉中: 鉛直線上の終点マーカーを出している時は隠す（終点に注目させる）。
+    /// - 対象捕捉中: 鉛直リファレンス線を出せている間は隠す（鉛直ガイドに注目させる）。
     private var show2DReticle: Bool {
         switch viewModel.state {
         case .waitingBase:
             return !viewModel.isReticleOnSurface
         case .waitingTarget:
-            return viewModel.projectedTarget == nil
+            return viewModel.projectedBase == nil || viewModel.projectedReferenceTop == nil
         case .initializing:
             return true
         }
     }
 
     // MARK: - ライブガイド（§7.6）
-    /// 終点を底点 `B` の鉛直線上（`projectedTarget`）に拘束して描く。これにより左右パンしても
-    /// ガイドは常に垂直になり、ユーザーは上下（ピッチ）で高さを合わせるだけでよい。
+    /// 鉛直リファレンス線（地面→上端）は `.waitingTarget` に入った時点から**常時**表示する。
+    /// 角度が有効（対象がカメラより上）になった時だけ、鉛直線上の終点マーカーと数値を重ねる。
+    /// 終点を `B` の鉛直線上に拘束しているため、左右にパンしてもガイドは常に垂直。
     private var guideOverlay: some View {
         GeometryReader { _ in
             if viewModel.state == .waitingTarget,
                let pb = viewModel.projectedBase,
-               let pt = viewModel.projectedTarget,
-               let h = viewModel.liveHeightMeters {
-                let dir = unitVector(from: pb, to: pt)
-                let ext = CGPoint(x: pt.x + dir.dx * 48, y: pt.y + dir.dy * 48)
-                let mid = CGPoint(x: (pb.x + pt.x) / 2, y: (pb.y + pt.y) / 2)
+               let top = viewModel.projectedReferenceTop {
                 ZStack {
-                    // 地面〜終点（鉛直）：点線
-                    Path { p in p.move(to: pb); p.addLine(to: pt) }
+                    // 鉛直リファレンス線（常時表示の点線）
+                    Path { p in p.move(to: pb); p.addLine(to: top) }
                         .stroke(Color.white, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, dash: [2, 9]))
                         .shadow(color: .black.opacity(0.4), radius: 1)
-                    // 終点の先：延長線（実線）
-                    Path { p in p.move(to: pt); p.addLine(to: ext) }
-                        .stroke(Color.white.opacity(0.9), lineWidth: 2)
-                    // 終点マーカー（鉛直線上）
-                    Circle()
-                        .stroke(Color.white, lineWidth: 2.5)
-                        .frame(width: 22, height: 22)
-                        .background(Circle().fill(.white).frame(width: 5, height: 5))
-                        .shadow(color: .black.opacity(0.4), radius: 2)
-                        .position(pt)
-                    // 数値ピル
-                    Text(formatLive(h))
-                        .font(.caption.weight(.bold))
-                        .monospacedDigit()
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .overlay(Capsule().stroke(accent, lineWidth: 1))
-                        .position(mid)
+
+                    // 角度が有効なときのみ、終点マーカー＋数値（鉛直線上の高さ H の点）
+                    if let pt = viewModel.projectedTarget, let h = viewModel.liveHeightMeters {
+                        Circle()
+                            .stroke(Color.white, lineWidth: 2.5)
+                            .frame(width: 22, height: 22)
+                            .background(Circle().fill(.white).frame(width: 5, height: 5))
+                            .shadow(color: .black.opacity(0.4), radius: 2)
+                            .position(pt)
+                        Text(formatLive(h))
+                            .font(.caption.weight(.bold))
+                            .monospacedDigit()
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay(Capsule().stroke(accent, lineWidth: 1))
+                            .position(CGPoint(x: (pb.x + pt.x) / 2, y: (pb.y + pt.y) / 2))
+                    }
                 }
             }
         }
-    }
-
-    private func unitVector(from a: CGPoint, to b: CGPoint) -> CGVector {
-        let dx = b.x - a.x
-        let dy = b.y - a.y
-        let len = max(0.0001, (dx * dx + dy * dy).squareRoot())
-        return CGVector(dx: dx / len, dy: dy / len)
     }
 
     /// 純正「計測」アプリ風の表記。1m 未満は cm、以上は m（小数2桁）。

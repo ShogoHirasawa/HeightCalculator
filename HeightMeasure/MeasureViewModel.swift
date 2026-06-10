@@ -35,6 +35,9 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     /// ライブガイド（§7.6）。`B` の真上・高さ `H` の終点 `T=(Bx,By+H,Bz)` を画面に投影した点。
     /// 終点を鉛直線上に拘束するため、レティクル（画面中央）ではなくこの点に線・終点マーカーを描く。
     @Published private(set) var projectedTarget: CGPoint? = nil
+    /// ライブガイド（§7.6）。常時表示する鉛直リファレンス線の上端（`B` の真上）を投影した点。
+    /// カメラを上げる前（角度が無効）でも鉛直ガイドを出すために使う。
+    @Published private(set) var projectedReferenceTop: CGPoint? = nil
     /// ライブガイド（§7.6）。現在のカメラ角度から算出した暫定の高さ（m）。無効角度のとき nil。
     @Published private(set) var liveHeightMeters: Double? = nil
 
@@ -240,6 +243,7 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
             if liveHeightMeters != nil { liveHeightMeters = nil }
             if projectedBase != nil { projectedBase = nil }
             if projectedTarget != nil { projectedTarget = nil }
+            if projectedReferenceTop != nil { projectedReferenceTop = nil }
             return
         }
         let mat = frame.camera.transform
@@ -252,11 +256,14 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         projectedBase = arView.project(base)
         // 終点は B の鉛直線上（高さ H）に拘束する。これにより左右に振れても線は常に垂直。
         if let height {
-            let target = base + SIMD3<Float>(0, Float(height), 0)
-            projectedTarget = arView.project(target)
+            projectedTarget = arView.project(base + SIMD3<Float>(0, Float(height), 0))
         } else {
             projectedTarget = nil
         }
+        // 鉛直リファレンス線の上端。角度が無効（カメラ未上昇）でも線を常時表示するため、
+        // 暫定高さ＋余白か最低0.6mのうち高い方まで伸ばす。
+        let refHeight = max(Float(height ?? 0) + 0.3, 0.6)
+        projectedReferenceTop = arView.project(base + SIMD3<Float>(0, refHeight, 0))
     }
 
     // MARK: - ステップ② 対象の捕捉と高さ算出（§5.2）
@@ -297,14 +304,15 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     // MARK: - AR 描画
+    /// 純正「計測」アプリ風の白いポイント（床に寝かせた白リング＋中心の白い点）を底点に置く。
     private func placeBaseMarker(at position: SIMD3<Float>) {
         guard let arView else { return }
         let anchor = AnchorEntity(world: position)
-        let sphere = ModelEntity(
-            mesh: .generateSphere(radius: 0.02),
-            materials: [SimpleMaterial(color: UIColor(hex: 0x1D9E75), isMetallic: false)]
-        )
-        anchor.addChild(sphere)
+        let white = UnlitMaterial(color: .white)
+        let ring = ModelEntity(mesh: Self.makeRingMesh(majorRadius: 0.03, tubeRadius: 0.003), materials: [white])
+        let dot = ModelEntity(mesh: .generateSphere(radius: 0.006), materials: [white])
+        anchor.addChild(ring)
+        anchor.addChild(dot)
         arView.scene.addAnchor(anchor)
         baseAnchor = anchor
         sceneAnchors.append(anchor)
@@ -315,7 +323,7 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         let anchor = AnchorEntity(world: base + SIMD3<Float>(0, height / 2, 0))
         let box = ModelEntity(
             mesh: .generateBox(size: SIMD3<Float>(0.005, height, 0.005)),
-            materials: [SimpleMaterial(color: UIColor(hex: 0x639922), isMetallic: false)]
+            materials: [UnlitMaterial(color: .white)]   // 純正Measureに合わせ白で統一
         )
         anchor.addChild(box)
         arView.scene.addAnchor(anchor)
