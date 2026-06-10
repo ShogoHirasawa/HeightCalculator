@@ -26,8 +26,17 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published private(set) var errorMessage: String? = nil
     /// 直近に追加した行のハイライト対象（§7.3）。
     @Published private(set) var highlightedID: UUID? = nil
-    /// 床ロック状態（§7.4）。レティクル色・フロアプレビュー・計測ボタンの有効判定に使う。
+    /// 床ロック状態（§7.4）。計測ボタンの有効判定に使う（水平の床のみ locked/approximate）。
     @Published private(set) var reticleState: ReticleState = .off
+    /// レティクルが何らかの面（床/壁）に乗っているか（§7.4）。2Dフォールバック表示の判定に使う。
+    @Published private(set) var isReticleOnSurface: Bool = false
+    /// ライブガイド（§7.6）。底点 `B` を画面に投影した点。`.waitingTarget` 中のみ非nil。
+    @Published private(set) var projectedBase: CGPoint? = nil
+    /// ライブガイド（§7.6）。`B` の真上・高さ `H` の終点 `T=(Bx,By+H,Bz)` を画面に投影した点。
+    /// 終点を鉛直線上に拘束するため、レティクル（画面中央）ではなくこの点に線・終点マーカーを描く。
+    @Published private(set) var projectedTarget: CGPoint? = nil
+    /// ライブガイド（§7.6）。現在のカメラ角度から算出した暫定の高さ（m）。無効角度のとき nil。
+    @Published private(set) var liveHeightMeters: Double? = nil
 
     // MARK: - AR 参照・内部状態
     private weak var arView: ARView?
@@ -170,17 +179,18 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
 
     // MARK: - ステップ① 底点の捕捉（§5.1）
 
-    /// 画面中央から水平面へレイキャストする（§5.1）。精度優先の順で試し、最初に当たった結果と
-    /// それが「正確（実検出の床）」かどうかを返す。
-    /// 1) `.existingPlaneGeometry`: 実検出された床の範囲内のみ。十字が指す“その場の床”に正確に当たる（exact=true）。
-    /// 2) `.estimatedPlane`: 特徴点からの推定平面。床がまだ十分検出されていない箇所の保険（exact=false）。
-    /// 3) `.existingPlaneInfinite`: 検出済み水平面の無限延長。遠く・浅角の屋外の根元など最後の保険（exact=false）。
-    private func raycastFloor(_ arView: ARView) -> (hit: ARRaycastResult, exact: Bool)? {
-        if let hit = arView.raycast(from: arView.center, allowing: .existingPlaneGeometry, alignment: .horizontal).first {
+    /// 画面中央から指定アラインメントの面へレイキャストする（§5.1）。精度優先の順で試し、
+    /// 最初に当たった結果と、それが「正確（実検出面）」かどうかを返す。
+    /// 1) `.existingPlaneGeometry`: 実検出された面の範囲内のみ（exact=true）。
+    /// 2) `.estimatedPlane`: 特徴点からの推定平面（exact=false）。
+    /// 3) `.existingPlaneInfinite`: 検出済み面の無限延長（exact=false）。
+    private func raycast(_ arView: ARView,
+                         alignment: ARRaycastQuery.TargetAlignment) -> (hit: ARRaycastResult, exact: Bool)? {
+        if let hit = arView.raycast(from: arView.center, allowing: .existingPlaneGeometry, alignment: alignment).first {
             return (hit, true)
         }
         for target: ARRaycastQuery.Target in [.estimatedPlane, .existingPlaneInfinite] {
-            if let hit = arView.raycast(from: arView.center, allowing: target, alignment: .horizontal).first {
+            if let hit = arView.raycast(from: arView.center, allowing: target, alignment: alignment).first {
                 return (hit, false)
             }
         }
@@ -188,7 +198,8 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     private func captureBase(_ arView: ARView) {
-        guard let hit = raycastFloor(arView)?.hit else {
+        // 底点は必ず水平の床に取る（§5.1）。
+        guard let hit = raycast(arView, alignment: .horizontal)?.hit else {
             showError(messageFloorNotFound)
             return
         }
@@ -199,21 +210,53 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         state = .waitingTarget
     }
 
-    // MARK: - 床に沿うレティクルの更新（§7.4）
-    /// 毎フレーム、底点選択中（.waitingBase）のみ床へレイキャストし、レティクルを床位置へ移動・
-    /// 床面に沿って向ける。床に当たらなければ非表示にし、reticleState を更新する。
+    // MARK: - 面に沿うレティクルの更新（§7.4）
+    /// 毎フレーム、底点選択中（.waitingBase）のみ面（床/壁）へレイキャストし、レティクルを
+    /// その面に沿って配置する。床（水平）に当たった時だけ reticleState を locked/approximate にし、
+    /// 壁（垂直）や未ヒットは off（計測ボタン無効）とする。
     private func updateReticle() {
-        guard state == .waitingBase, let arView, let result = raycastFloor(arView) else {
+        guard state == .waitingBase, let arView, let result = raycast(arView, alignment: .any) else {
             if reticleState != .off { reticleState = .off }
+            if isReticleOnSurface { isReticleOnSurface = false }
             reticleEntity?.isEnabled = false
             return
         }
-        // 床面のワールド変換（位置＋向き）をそのまま適用し、面に寝かせて配置する。
+        // 面のワールド変換（位置＋向き）をそのまま適用し、床なら寝かせ、壁なら立てて配置する。
         reticleEntity?.transform = Transform(matrix: result.hit.worldTransform)
         reticleEntity?.isEnabled = true
+        if !isReticleOnSurface { isReticleOnSurface = true }
 
-        let newState: ReticleState = result.exact ? .locked : .approximate
+        // 床（水平面）のときのみ計測可能。壁（垂直）は off。
+        let isFloor = result.hit.targetAlignment == .horizontal
+        let newState: ReticleState = isFloor ? (result.exact ? .locked : .approximate) : .off
         if newState != reticleState { reticleState = newState }
+    }
+
+    // MARK: - ライブガイドの更新（§7.6）
+    /// 毎フレーム、対象捕捉中（.waitingTarget）のみ、現在のカメラ角度から暫定の高さを計算し、
+    /// 底点の画面投影とともに公開する。OverlayView 側で点線・数値・延長線を描画する。
+    private func updateGuide(frame: ARFrame) {
+        guard state == .waitingTarget, let base = baseWorldPosition, let arView else {
+            if liveHeightMeters != nil { liveHeightMeters = nil }
+            if projectedBase != nil { projectedBase = nil }
+            if projectedTarget != nil { projectedTarget = nil }
+            return
+        }
+        let mat = frame.camera.transform
+        let camera = SIMD3<Float>(mat.columns.3.x, mat.columns.3.y, mat.columns.3.z)
+        let forward = simd_normalize(-SIMD3<Float>(mat.columns.2.x, mat.columns.2.y, mat.columns.2.z))
+        let height = HeightCalculator.height(camera: SIMD3<Double>(camera),
+                                             forward: SIMD3<Double>(forward),
+                                             base: SIMD3<Double>(base))
+        liveHeightMeters = height
+        projectedBase = arView.project(base)
+        // 終点は B の鉛直線上（高さ H）に拘束する。これにより左右に振れても線は常に垂直。
+        if let height {
+            let target = base + SIMD3<Float>(0, Float(height), 0)
+            projectedTarget = arView.project(target)
+        } else {
+            projectedTarget = nil
+        }
     }
 
     // MARK: - ステップ② 対象の捕捉と高さ算出（§5.2）
@@ -310,6 +353,7 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         updateReticle()
+        updateGuide(frame: frame)
     }
 }
 

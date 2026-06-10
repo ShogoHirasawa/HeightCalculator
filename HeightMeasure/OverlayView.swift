@@ -21,12 +21,21 @@ struct OverlayView: View {
 
     var body: some View {
         ZStack {
-            // 2Dレティクル（フォールバック）。床に沿うリングは AR 空間側（MeasureViewModel）で
-            // 描画するため、床に当たっている底点選択中は 2D を隠す。
-            if show2DReticle {
-                reticle
+            // 画面中央レイヤー（レティクル＋ライブガイド）。レイキャスト原点と一致させるため
+            // セーフエリアを無視してフルスクリーン中央に置く。
+            ZStack {
+                // 2Dレティクル（フォールバック）。面に沿うリングは AR 空間側で描画するため、
+                // 何らかの面に乗っている底点選択中は 2D を隠す。
+                if show2DReticle {
+                    reticle
+                }
+                // ライブガイド（§7.6）：地面〜レティクル間の点線・数値・延長線。
+                guideOverlay
             }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
 
+            // 操作レイヤー（セーフエリア内）。
             VStack(spacing: 0) {
                 banner
                     .padding(.horizontal, 16)
@@ -42,14 +51,72 @@ struct OverlayView: View {
         }
     }
 
-    /// 2Dレティクルを表示するか。底点選択中に床へ当たっている時だけ、AR の床リングに任せて隠す。
+    /// 2Dレティクルを表示するか。
+    /// - 底点選択中: 面へ乗っている時は AR の面リングに任せて隠す。
+    /// - 対象捕捉中: 鉛直線上の終点マーカーを出している時は隠す（終点に注目させる）。
     private var show2DReticle: Bool {
         switch viewModel.state {
         case .waitingBase:
-            return viewModel.reticleState == .off
-        case .waitingTarget, .initializing:
+            return !viewModel.isReticleOnSurface
+        case .waitingTarget:
+            return viewModel.projectedTarget == nil
+        case .initializing:
             return true
         }
+    }
+
+    // MARK: - ライブガイド（§7.6）
+    /// 終点を底点 `B` の鉛直線上（`projectedTarget`）に拘束して描く。これにより左右パンしても
+    /// ガイドは常に垂直になり、ユーザーは上下（ピッチ）で高さを合わせるだけでよい。
+    private var guideOverlay: some View {
+        GeometryReader { _ in
+            if viewModel.state == .waitingTarget,
+               let pb = viewModel.projectedBase,
+               let pt = viewModel.projectedTarget,
+               let h = viewModel.liveHeightMeters {
+                let dir = unitVector(from: pb, to: pt)
+                let ext = CGPoint(x: pt.x + dir.dx * 48, y: pt.y + dir.dy * 48)
+                let mid = CGPoint(x: (pb.x + pt.x) / 2, y: (pb.y + pt.y) / 2)
+                ZStack {
+                    // 地面〜終点（鉛直）：点線
+                    Path { p in p.move(to: pb); p.addLine(to: pt) }
+                        .stroke(Color.white, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, dash: [2, 9]))
+                        .shadow(color: .black.opacity(0.4), radius: 1)
+                    // 終点の先：延長線（実線）
+                    Path { p in p.move(to: pt); p.addLine(to: ext) }
+                        .stroke(Color.white.opacity(0.9), lineWidth: 2)
+                    // 終点マーカー（鉛直線上）
+                    Circle()
+                        .stroke(Color.white, lineWidth: 2.5)
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(.white).frame(width: 5, height: 5))
+                        .shadow(color: .black.opacity(0.4), radius: 2)
+                        .position(pt)
+                    // 数値ピル
+                    Text(formatLive(h))
+                        .font(.caption.weight(.bold))
+                        .monospacedDigit()
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .overlay(Capsule().stroke(accent, lineWidth: 1))
+                        .position(mid)
+                }
+            }
+        }
+    }
+
+    private func unitVector(from a: CGPoint, to b: CGPoint) -> CGVector {
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let len = max(0.0001, (dx * dx + dy * dy).squareRoot())
+        return CGVector(dx: dx / len, dy: dy / len)
+    }
+
+    /// 純正「計測」アプリ風の表記。1m 未満は cm、以上は m（小数2桁）。
+    private func formatLive(_ h: Double) -> String {
+        h < 1.0 ? "\(Int((h * 100).rounded())) cm" : String(format: "%.2f m", h)
     }
 
     // MARK: - 2Dレティクル（床非ヒット時・対象捕捉時のフォールバック）
