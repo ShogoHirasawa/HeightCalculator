@@ -21,6 +21,12 @@ struct ShareItem: Identifiable {
     let image: UIImage
 }
 
+/// 確定した計測の数値ピルを線上に常時表示するための投影情報（§7.6）。
+struct MeasurementOverlay {
+    let mid: CGPoint   // 線の中点（数値ピルの位置）
+    let text: String
+}
+
 /// 仕様書 §6・§5・§8 を担う ObservableObject 兼 ARSessionDelegate（§9）。
 @MainActor
 final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
@@ -30,8 +36,8 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published private(set) var measurements: [Measurement] = []
     /// エラー表示中はバナーをこの文言・赤背景にする（§8）。
     @Published private(set) var errorMessage: String? = nil
-    /// 直近に追加した行のハイライト対象（§7.3）。
-    @Published private(set) var highlightedID: UUID? = nil
+    /// 確定した計測の数値ピル（§7.6）。waitingBase/撮影中、線の中点に常時表示する。
+    @Published private(set) var measurementOverlay: MeasurementOverlay? = nil
     /// 床ロック状態（§7.4）。計測ボタンの有効判定に使う（水平の床のみ locked/approximate）。
     @Published private(set) var reticleState: ReticleState = .off
     /// レティクルが何らかの面（床/壁）に乗っているか（§7.4）。2Dフォールバック表示の判定に使う。
@@ -68,7 +74,6 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     private var baseWorldPosition: SIMD3<Float>?
     private var nextIndex: Int = 1
     private var errorToken: Int = 0
-    private var highlightToken: Int = 0
     private var savedToastToken: Int = 0
     /// 床に沿って配置するレティクル本体（§7.4）。白いリング＋中心点を、十字が指す床位置に
     /// 置き、床面に寝かせて表示する（見る角度で楕円に傾く＝純正「計測」アプリ風）。
@@ -173,20 +178,24 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
 
     /// クリアボタン押下（§7.1-5）。
     func clearTapped() {
-        guard let arView else { return }
-        for anchor in sceneAnchors {
-            arView.scene.removeAnchor(anchor)
+        clearScene()
+        // 水平面は検出済みのため waitingBase に戻す。
+        if state != .initializing {
+            state = .waitingBase
+        }
+    }
+
+    /// AR上の計測エンティティ・結果・数値ピルをすべて消す（単一計測の置換やクリアで使う）。
+    private func clearScene() {
+        if let arView {
+            for anchor in sceneAnchors { arView.scene.removeAnchor(anchor) }
         }
         sceneAnchors.removeAll()
         baseAnchor = nil
         baseWorldPosition = nil
         measurements.removeAll()
         nextIndex = 1
-        highlightedID = nil
-        // 水平面は検出済みのため waitingBase に戻す。
-        if state != .initializing {
-            state = .waitingBase
-        }
+        measurementOverlay = nil
     }
 
     /// やり直しボタン押下（§7.1-6）。.waitingTarget のときのみ有効。
@@ -227,10 +236,12 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
             showError(messageFloorNotFound)
             return
         }
+        // 単一計測（§7.1）: 新しい計測を始める前に、既存の計測（線・マーカー・数値）を消す。
+        clearScene()
         let t = hit.worldTransform
         let base = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
         baseWorldPosition = base
-        placeBaseMarker(at: base)
+        baseAnchor = placeMarker(at: base)
         state = .waitingTarget
     }
 
@@ -321,20 +332,21 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         }
 
         drawVerticalLine(from: base, height: Float(H))
+        _ = placeMarker(at: base + SIMD3<Float>(0, Float(H), 0))   // 終点（上端）マーカー
 
         let measurement = Measurement(id: UUID(), index: nextIndex, heightMeters: H, base: base)
         nextIndex += 1
         measurements.insert(measurement, at: 0)
-        highlight(measurement.id)
 
         baseAnchor = nil      // この計測は確定（マーカーは残す）。
         state = .waitingBase
     }
 
     // MARK: - AR 描画
-    /// 純正「計測」アプリ風の白いポイント（床に寝かせた白リング＋中心の白い点）を底点に置く。
-    private func placeBaseMarker(at position: SIMD3<Float>) {
-        guard let arView else { return }
+    /// 純正「計測」アプリ風の白いポイント（床に寝かせた白リング＋中心の白い点）を置く。底点・終点で共用。
+    @discardableResult
+    private func placeMarker(at position: SIMD3<Float>) -> AnchorEntity? {
+        guard let arView else { return nil }
         let anchor = AnchorEntity(world: position)
         let white = UnlitMaterial(color: .white)
         let ring = ModelEntity(mesh: Self.makeRingMesh(majorRadius: 0.03, tubeRadius: 0.003), materials: [white])
@@ -342,8 +354,8 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         anchor.addChild(ring)
         anchor.addChild(dot)
         arView.scene.addAnchor(anchor)
-        baseAnchor = anchor
         sceneAnchors.append(anchor)
+        return anchor
     }
 
     private func drawVerticalLine(from base: SIMD3<Float>, height: Float) {
@@ -376,21 +388,19 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         targetInFrame = false
     }
 
-    /// シャッター: ARビューを撮影し、各計測の高さ数値を線の中点に合成して、ステップ③へ。
+    /// シャッター: ARビューを撮影し、計測の高さ数値を線の中点に合成して、ステップ③へ。
     func shutter() {
-        guard let arView, !measurements.isEmpty else { return }
-        let labels: [(point: CGPoint, text: String)] = measurements.compactMap { m in
-            let mid = m.base + SIMD3<Float>(0, Float(m.heightMeters) / 2, 0)
-            guard let p = arView.project(mid), arView.bounds.contains(p) else { return nil }
-            return (p, String(format: "%.2f m", m.heightMeters))
-        }
+        guard let arView, let m = measurements.first else { return }
+        let viewSize = arView.bounds.size
+        let midWorld = m.base + SIMD3<Float>(0, Float(m.heightMeters) / 2, 0)
+        let label = arView.project(midWorld).map { (point: $0, text: HeightFormat.string(m.heightMeters)) }
         arView.snapshot(saveToHDR: false) { [weak self] image in
             guard let self else { return }
             DispatchQueue.main.async {
                 self.captureMode = false
                 self.suppressReticle = false
                 guard let image else { return }
-                self.capturedImage = Self.composite(image, labels: labels)
+                self.capturedImage = Self.composite(image, viewSize: viewSize, labels: label.map { [$0] } ?? [])
             }
         }
     }
@@ -443,23 +453,27 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         if t != targetInFrame { targetInFrame = t }
     }
 
-    /// スナップショットに数値ピル（白いカプセル＋黒文字、純正Measure風）を合成する。
-    private static func composite(_ base: UIImage, labels: [(point: CGPoint, text: String)]) -> UIImage {
+    /// スナップショットに数値ピル（白いカプセル＋黒文字、純正Measure風）を線の中点へ合成する。
+    /// 投影座標はビュー（ポイント）系のため、スナップショット画像サイズとの比 `scale` で位置・寸法を補正する
+    /// （これを行わないと数値が画像の隅に小さく描かれる）。
+    private static func composite(_ base: UIImage, viewSize: CGSize,
+                                  labels: [(point: CGPoint, text: String)]) -> UIImage {
+        let scale = viewSize.width > 0 ? base.size.width / viewSize.width : 1
         let renderer = UIGraphicsImageRenderer(size: base.size)
         return renderer.image { ctx in
             base.draw(at: .zero)
             let cg = ctx.cgContext
-            let font = UIFont.systemFont(ofSize: 16, weight: .semibold)
+            let font = UIFont.systemFont(ofSize: 16 * scale, weight: .semibold)
             let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.black]
             for label in labels {
+                let center = CGPoint(x: label.point.x * scale, y: label.point.y * scale)
                 let textSize = (label.text as NSString).size(withAttributes: attrs)
-                let padH: CGFloat = 11, padV: CGFloat = 6
+                let padH = 11 * scale, padV = 6 * scale
                 let pillW = textSize.width + padH * 2
                 let pillH = textSize.height + padV * 2
-                let rect = CGRect(x: label.point.x - pillW / 2, y: label.point.y - pillH / 2,
-                                  width: pillW, height: pillH)
+                let rect = CGRect(x: center.x - pillW / 2, y: center.y - pillH / 2, width: pillW, height: pillH)
                 cg.saveGState()
-                cg.setShadow(offset: CGSize(width: 0, height: 1), blur: 3,
+                cg.setShadow(offset: CGSize(width: 0, height: 1 * scale), blur: 3 * scale,
                              color: UIColor.black.withAlphaComponent(0.3).cgColor)
                 UIColor.white.setFill()
                 UIBezierPath(roundedRect: rect, cornerRadius: pillH / 2).fill()
@@ -470,6 +484,20 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
+    /// 確定した計測の数値ピル位置（線の中点）を毎フレーム投影して公開する（§7.6 常時表示）。
+    private func updateMeasurementOverlay() {
+        guard let arView, capturedImage == nil, let m = measurements.first else {
+            if measurementOverlay != nil { measurementOverlay = nil }
+            return
+        }
+        let midWorld = m.base + SIMD3<Float>(0, Float(m.heightMeters) / 2, 0)
+        guard let mid = arView.project(midWorld) else {
+            if measurementOverlay != nil { measurementOverlay = nil }
+            return
+        }
+        measurementOverlay = MeasurementOverlay(mid: mid, text: HeightFormat.string(m.heightMeters))
+    }
+
     // MARK: - フィードバック
     private func showError(_ message: String) {
         errorToken += 1
@@ -478,16 +506,6 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             guard let self, self.errorToken == token else { return }
             self.errorMessage = nil
-        }
-    }
-
-    private func highlight(_ id: UUID) {
-        highlightToken += 1
-        let token = highlightToken
-        highlightedID = id
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard let self, self.highlightToken == token else { return }
-            self.highlightedID = nil
         }
     }
 
@@ -503,6 +521,7 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         updateReticle()
         updateGuide(frame: frame)
         updateFraming()
+        updateMeasurementOverlay()
     }
 }
 
