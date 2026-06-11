@@ -26,7 +26,6 @@ struct OverlayView: View {
     // 配色
     private let accent = Color(UIColor(hex: 0x1D9E75))       // アクセント緑
     private let errorRed = Color(UIColor(hex: 0xA32D2D))     // エラー（§8）
-    private let highlight = Color(UIColor(hex: 0xE1F5EE))    // 行ハイライト（§7.3）
 
     var body: some View {
         ZStack {
@@ -36,6 +35,13 @@ struct OverlayView: View {
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
                 normalControls
+            }
+
+            // 確定した計測の数値ピル（§7.6）。計測後（ステップ1）・撮影中（ステップ2）とも線上に常時表示。
+            if viewModel.capturedImage == nil, let overlay = viewModel.measurementOverlay {
+                measurementNumber(overlay)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
             }
 
             // ステップ2（撮影）: フレーミングガイド＋シャッター。
@@ -75,8 +81,22 @@ struct OverlayView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
             Spacer()
-            resultList
             bottomBar
+        }
+    }
+
+    // 確定した計測の数値ピル（純正Measure風：白カプセル＋黒文字）を線の中点に置く（§7.6）。
+    private func measurementNumber(_ overlay: MeasurementOverlay) -> some View {
+        ZStack {
+            Text(overlay.text)
+                .font(.footnote.weight(.semibold))
+                .monospacedDigit()
+                .foregroundStyle(.black)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(.white))
+                .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
+                .position(overlay.mid)
         }
     }
 
@@ -135,10 +155,8 @@ struct OverlayView: View {
         }
     }
 
-    /// 純正「計測」アプリ風の表記。1m 未満は cm、以上は m（小数2桁）。
-    private func formatLive(_ h: Double) -> String {
-        h < 1.0 ? "\(Int((h * 100).rounded())) cm" : String(format: "%.2f m", h)
-    }
+    /// 純正「計測」アプリ風の表記（共通フォーマッタ）。
+    private func formatLive(_ h: Double) -> String { HeightFormat.string(h) }
 
     // MARK: - 2Dレティクル（床非ヒット時・対象捕捉時のフォールバック）
     private var reticle: some View {
@@ -187,38 +205,6 @@ struct OverlayView: View {
                 .fill(isError ? AnyShapeStyle(errorRed) : AnyShapeStyle(.ultraThinMaterial))
         )
         .animation(.easeInOut(duration: 0.2), value: isError)
-    }
-
-    // MARK: - 結果リスト（§7.1-3 / §7.3）
-    private var resultList: some View {
-        ScrollView {
-            VStack(spacing: 8) {
-                ForEach(viewModel.measurements) { measurement in
-                    let isHighlighted = viewModel.highlightedID == measurement.id
-                    HStack(spacing: 10) {
-                        Image(systemName: "ruler")
-                            .font(.footnote.weight(.semibold))
-                        Text("計測 \(measurement.index)")
-                            .font(.subheadline.weight(.medium))
-                        Spacer(minLength: 8)
-                        Text(String(format: "%.2f m", measurement.heightMeters))
-                            .font(.headline.monospacedDigit())
-                    }
-                    .foregroundStyle(isHighlighted ? Color.black : Color.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(isHighlighted ? AnyShapeStyle(highlight) : AnyShapeStyle(.ultraThinMaterial))
-                    )
-                    .animation(.easeInOut(duration: 0.2), value: isHighlighted)
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 4)
-        }
-        // 最大5件（約52pt/行）を可視とし、超過分はスクロール。
-        .frame(maxHeight: 5 * 52)
     }
 
     // MARK: - ボタン行（§7.1-4,5,6）
@@ -311,12 +297,11 @@ struct OverlayView: View {
     private var captureOverlay: some View {
         let ready = viewModel.baseInFrame && viewModel.targetInFrame
         return VStack(spacing: 0) {
-            // 上部ガイド
+            // 上部ガイド（文言は最小限。詳細はチップで示す）
             VStack(spacing: 10) {
                 HStack(spacing: 8) {
                     Image(systemName: "viewfinder").font(.subheadline.weight(.bold))
-                    Text("地面・対象（建物）・終点が画角に入るように引いて撮影してください")
-                        .fixedSize(horizontal: false, vertical: true)
+                    Text("引いて全体を画角に入れて撮影")
                 }
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.white)

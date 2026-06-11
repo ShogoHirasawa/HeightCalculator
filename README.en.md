@@ -21,7 +21,7 @@ Valid conditions: `f_h >= 0.05` (not aimed too close to straight up) and `fy > 0
 
 ## Features
 
-- Multiple measurements per session, accumulated in a numbered list at the bottom (newest on top).
+- **Single measurement**: one measurement at a time; re-measuring replaces the previous one. The confirmed height is always shown as a pill (white capsule, black text) at the midpoint of the line.
 - **Surface-conforming reticle**: an Apple Measure-style reticle (a white ring in AR space) tilts to lie on the surface it hits — flat on floors, upright on walls. The base point (①) only enables the measure button on a horizontal floor, preventing accidental selection of a wall.
 - **Live guide**: after the base is set, while aiming at the target, a dotted line from the ground to the reticle, a live height value (cm/m), and an extension line are shown in real time.
 - **Capture → save/share (3 steps)**: ① measure → ② capture mode (a framing guide turns green ✓ once the ground and endpoint are in frame, then shutter) → ③ preview to save (camera roll) or share. The height value is composited onto the photo, so ground, target, vertical line, and number all fit in one shot.
