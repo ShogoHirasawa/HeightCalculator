@@ -12,9 +12,9 @@ enum MeasureState {
         case .initializing:
             return "床（地面）を映してください"
         case .waitingBase:
-            return "壁の根元（対象の真下の地面）に照準を合わせて「計測」を押してください"
+            return "地面に照準を合わせてボタンを押してください"
         case .waitingTarget:
-            return "対象（ベランダの縁など）に照準を合わせて「計測」を押してください"
+            return "対象（ベランダの縁など）に照準を合わせてボタンを押してください"
         }
     }
 
@@ -24,9 +24,9 @@ enum MeasureState {
         case .initializing:
             return "準備中…"
         case .waitingBase:
-            return "① 壁の根元を指定"
+            return "地面を指定"
         case .waitingTarget:
-            return "② 高さを計測"
+            return "高さを計測"
         }
     }
 

@@ -239,7 +239,9 @@ struct OverlayView: View {
         Button(action: { viewModel.measureTapped() }) {
             HStack(spacing: 8) {
                 Image(systemName: measureSymbol)
-                Text(viewModel.state.buttonLabel)
+                Text(viewModel.state == .waitingBase && !viewModel.measurements.isEmpty
+                     ? "再計測する"
+                     : viewModel.state.buttonLabel)
             }
             .font(.headline.weight(.bold))
             .foregroundStyle(.white)
