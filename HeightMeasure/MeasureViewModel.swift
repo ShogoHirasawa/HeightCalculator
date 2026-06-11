@@ -5,6 +5,16 @@ import UIKit
 import simd
 import Combine
 
+/// 底点選択中（.waitingBase）に、画面中央が床を捉えているかの状態（§7.4 ガイドUI）。
+/// - off: 床に当たっていない（壁・空中など）→ 計測ボタン無効
+/// - approximate: 推定平面・無限延長にのみ当たっている（遠方/未検出）→ おおよそ
+/// - locked: 実検出された床（.existingPlaneGeometry）に当たっている → 正確
+enum ReticleState {
+    case off
+    case approximate
+    case locked
+}
+
 /// 仕様書 §6・§5・§8 を担う ObservableObject 兼 ARSessionDelegate（§9）。
 @MainActor
 final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
@@ -16,6 +26,20 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published private(set) var errorMessage: String? = nil
     /// 直近に追加した行のハイライト対象（§7.3）。
     @Published private(set) var highlightedID: UUID? = nil
+    /// 床ロック状態（§7.4）。計測ボタンの有効判定に使う（水平の床のみ locked/approximate）。
+    @Published private(set) var reticleState: ReticleState = .off
+    /// レティクルが何らかの面（床/壁）に乗っているか（§7.4）。2Dフォールバック表示の判定に使う。
+    @Published private(set) var isReticleOnSurface: Bool = false
+    /// ライブガイド（§7.6）。底点 `B` を画面に投影した点。`.waitingTarget` 中のみ非nil。
+    @Published private(set) var projectedBase: CGPoint? = nil
+    /// ライブガイド（§7.6）。`B` の真上・高さ `H` の終点 `T=(Bx,By+H,Bz)` を画面に投影した点。
+    /// 終点を鉛直線上に拘束するため、レティクル（画面中央）ではなくこの点に線・終点マーカーを描く。
+    @Published private(set) var projectedTarget: CGPoint? = nil
+    /// ライブガイド（§7.6）。常時表示する鉛直リファレンス線の上端（`B` の真上）を投影した点。
+    /// カメラを上げる前（角度が無効）でも鉛直ガイドを出すために使う。
+    @Published private(set) var projectedReferenceTop: CGPoint? = nil
+    /// ライブガイド（§7.6）。現在のカメラ角度から算出した暫定の高さ（m）。無効角度のとき nil。
+    @Published private(set) var liveHeightMeters: Double? = nil
 
     // MARK: - AR 参照・内部状態
     private weak var arView: ARView?
@@ -27,17 +51,73 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     private var nextIndex: Int = 1
     private var errorToken: Int = 0
     private var highlightToken: Int = 0
+    /// 床に沿って配置するレティクル本体（§7.4）。白いリング＋中心点を、十字が指す床位置に
+    /// 置き、床面に寝かせて表示する（見る角度で楕円に傾く＝純正「計測」アプリ風）。
+    private var reticleEntity: Entity?
 
     // MARK: - エラー文言（§8）
     private let messageFloorNotFound = "床が検出できません。地面を映してから再度お試しください"
     private let messageTooSteep = "角度が急すぎます。少し下げて対象に合わせてください"
-    private let messageTargetBelow = "対象はスマホより上に合わせてください"
+    private let messageTooLow = "対象が低すぎます。底点より上を狙ってください"
     private let messageTracking = "動かさずに少し待ってください（トラッキング調整中）"
 
     // MARK: - セットアップ
     func attach(arView: ARView) {
         self.arView = arView
         arView.session.delegateQueue = .main
+        setupReticleEntity(in: arView)
+    }
+
+    /// 床に沿うレティクル（白いリング＋中心点）を1つだけ生成しておく（§7.4）。
+    private func setupReticleEntity(in arView: ARView) {
+        let anchor = AnchorEntity(world: .zero)
+        let parent = Entity()
+
+        // 閉じたトーラス＋球なので、UnlitMaterial の白で表裏問わずリングとして見える。
+        let material = UnlitMaterial(color: .white)
+        let ring = ModelEntity(mesh: Self.makeRingMesh(), materials: [material])
+        let dot = ModelEntity(mesh: .generateSphere(radius: 0.004), materials: [material])
+        parent.addChild(ring)
+        parent.addChild(dot)
+        parent.isEnabled = false
+
+        anchor.addChild(parent)
+        arView.scene.addAnchor(anchor)
+        reticleEntity = parent
+    }
+
+    /// 床に寝かせて表示するリング（トーラス）メッシュを生成する。XZ平面に水平に作る。
+    private static func makeRingMesh(majorRadius R: Float = 0.045, tubeRadius r: Float = 0.0035,
+                                     majorSeg: Int = 48, minorSeg: Int = 10) -> MeshResource {
+        var positions: [SIMD3<Float>] = []
+        var normals: [SIMD3<Float>] = []
+        var indices: [UInt32] = []
+        for i in 0..<majorSeg {
+            let u = Float(i) / Float(majorSeg) * 2 * .pi
+            let cu = cos(u); let su = sin(u)
+            for j in 0..<minorSeg {
+                let v = Float(j) / Float(minorSeg) * 2 * .pi
+                let cv = cos(v); let sv = sin(v)
+                positions.append([(R + r * cv) * cu, r * sv, (R + r * cv) * su])
+                normals.append([cv * cu, sv, cv * su])
+            }
+        }
+        for i in 0..<majorSeg {
+            for j in 0..<minorSeg {
+                let i1 = (i + 1) % majorSeg
+                let j1 = (j + 1) % minorSeg
+                let a = UInt32(i * minorSeg + j)
+                let b = UInt32(i1 * minorSeg + j)
+                let c = UInt32(i1 * minorSeg + j1)
+                let d = UInt32(i * minorSeg + j1)
+                indices += [a, b, c, a, c, d]
+            }
+        }
+        var descriptor = MeshDescriptor(name: "reticleRing")
+        descriptor.positions = MeshBuffers.Positions(positions)
+        descriptor.normals = MeshBuffers.Normals(normals)
+        descriptor.primitives = .triangles(indices)
+        return (try? MeshResource.generate(from: [descriptor])) ?? .generateSphere(radius: R)
     }
 
     // MARK: - ボタン操作
@@ -102,21 +182,27 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
 
     // MARK: - ステップ① 底点の捕捉（§5.1）
 
-    /// 画面中央から水平面へレイキャストする（§5.1）。精度優先の順で試し、最初に当たった結果を返す。
-    /// 1) `.existingPlaneGeometry`: 実検出された床の範囲内のみ。十字が指す“その場の床”に正確に当たる（屋内・近距離向け）。
-    /// 2) `.estimatedPlane`: 特徴点からの推定平面。床がまだ十分検出されていない箇所の保険。
-    /// 3) `.existingPlaneInfinite`: 検出済み水平面の無限延長。遠く・浅角の屋外の根元など最後の保険。
-    private func raycastFloor(_ arView: ARView) -> [ARRaycastResult] {
-        let targets: [ARRaycastQuery.Target] = [.existingPlaneGeometry, .estimatedPlane, .existingPlaneInfinite]
-        for target in targets {
-            let hits = arView.raycast(from: arView.center, allowing: target, alignment: .horizontal)
-            if !hits.isEmpty { return hits }
+    /// 画面中央から指定アラインメントの面へレイキャストする（§5.1）。精度優先の順で試し、
+    /// 最初に当たった結果と、それが「正確（実検出面）」かどうかを返す。
+    /// 1) `.existingPlaneGeometry`: 実検出された面の範囲内のみ（exact=true）。
+    /// 2) `.estimatedPlane`: 特徴点からの推定平面（exact=false）。
+    /// 3) `.existingPlaneInfinite`: 検出済み面の無限延長（exact=false）。
+    private func raycast(_ arView: ARView,
+                         alignment: ARRaycastQuery.TargetAlignment) -> (hit: ARRaycastResult, exact: Bool)? {
+        if let hit = arView.raycast(from: arView.center, allowing: .existingPlaneGeometry, alignment: alignment).first {
+            return (hit, true)
         }
-        return []
+        for target: ARRaycastQuery.Target in [.estimatedPlane, .existingPlaneInfinite] {
+            if let hit = arView.raycast(from: arView.center, allowing: target, alignment: alignment).first {
+                return (hit, false)
+            }
+        }
+        return nil
     }
 
     private func captureBase(_ arView: ARView) {
-        guard let hit = raycastFloor(arView).first else {
+        // 底点は必ず水平の床に取る（§5.1）。
+        guard let hit = raycast(arView, alignment: .horizontal)?.hit else {
             showError(messageFloorNotFound)
             return
         }
@@ -125,6 +211,61 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         baseWorldPosition = base
         placeBaseMarker(at: base)
         state = .waitingTarget
+    }
+
+    // MARK: - 面に沿うレティクルの更新（§7.4）
+    /// 毎フレーム、底点選択中（.waitingBase）のみ面（床/壁）へレイキャストし、レティクルを
+    /// その面に沿って配置する。床（水平）に当たった時だけ reticleState を locked/approximate にし、
+    /// 壁（垂直）や未ヒットは off（計測ボタン無効）とする。
+    private func updateReticle() {
+        guard state == .waitingBase, let arView, let result = raycast(arView, alignment: .any) else {
+            if reticleState != .off { reticleState = .off }
+            if isReticleOnSurface { isReticleOnSurface = false }
+            reticleEntity?.isEnabled = false
+            return
+        }
+        // 面のワールド変換（位置＋向き）をそのまま適用し、床なら寝かせ、壁なら立てて配置する。
+        reticleEntity?.transform = Transform(matrix: result.hit.worldTransform)
+        reticleEntity?.isEnabled = true
+        if !isReticleOnSurface { isReticleOnSurface = true }
+
+        // 床（水平面）のときのみ計測可能。壁（垂直）は off。
+        let isFloor = result.hit.targetAlignment == .horizontal
+        let newState: ReticleState = isFloor ? (result.exact ? .locked : .approximate) : .off
+        if newState != reticleState { reticleState = newState }
+    }
+
+    // MARK: - ライブガイドの更新（§7.6）
+    /// 毎フレーム、対象捕捉中（.waitingTarget）のみ、現在のカメラ角度から暫定の高さを計算し、
+    /// 底点の画面投影とともに公開する。OverlayView 側で点線・数値・延長線を描画する。
+    private func updateGuide(frame: ARFrame) {
+        guard state == .waitingTarget, let base = baseWorldPosition, let arView else {
+            if liveHeightMeters != nil { liveHeightMeters = nil }
+            if projectedBase != nil { projectedBase = nil }
+            if projectedTarget != nil { projectedTarget = nil }
+            if projectedReferenceTop != nil { projectedReferenceTop = nil }
+            return
+        }
+        let mat = frame.camera.transform
+        let camera = SIMD3<Float>(mat.columns.3.x, mat.columns.3.y, mat.columns.3.z)
+        let forward = simd_normalize(-SIMD3<Float>(mat.columns.2.x, mat.columns.2.y, mat.columns.2.z))
+        let height = HeightCalculator.height(camera: SIMD3<Double>(camera),
+                                             forward: SIMD3<Double>(forward),
+                                             base: SIMD3<Double>(base))
+        // 見下ろし（カメラより低い対象）でも数値を出す。負の高さ（底点より下を狙った）だけ除外。
+        let validHeight = (height ?? -1) > 0 ? height : nil
+        liveHeightMeters = validHeight
+        projectedBase = arView.project(base)
+        // 終点は B の鉛直線上（高さ H）に拘束する。これにより左右に振れても線は常に垂直。
+        if let validHeight {
+            projectedTarget = arView.project(base + SIMD3<Float>(0, Float(validHeight), 0))
+        } else {
+            projectedTarget = nil
+        }
+        // 鉛直リファレンス線の上端。数値が出ない極端な角度でも線を常時表示するため、
+        // 暫定高さ＋余白か最低0.6mのうち高い方まで伸ばす。
+        let refHeight = max(Float(validHeight ?? 0) + 0.3, 0.6)
+        projectedReferenceTop = arView.project(base + SIMD3<Float>(0, refHeight, 0))
     }
 
     // MARK: - ステップ② 対象の捕捉と高さ算出（§5.2）
@@ -141,15 +282,16 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
             showError(messageTooSteep)
             return
         }
-        if forward.y <= 0 {
-            showError(messageTargetBelow)
-            return
-        }
 
         guard let H = HeightCalculator.height(camera: SIMD3<Double>(camera),
                                               forward: SIMD3<Double>(forward),
                                               base: SIMD3<Double>(base)) else {
             showError(messageTooSteep)
+            return
+        }
+        // 見下ろしでも測れるが、底点と同じか下（H<=0）は高さとして無効。
+        guard H > 0 else {
+            showError(messageTooLow)
             return
         }
 
@@ -165,14 +307,15 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     // MARK: - AR 描画
+    /// 純正「計測」アプリ風の白いポイント（床に寝かせた白リング＋中心の白い点）を底点に置く。
     private func placeBaseMarker(at position: SIMD3<Float>) {
         guard let arView else { return }
         let anchor = AnchorEntity(world: position)
-        let sphere = ModelEntity(
-            mesh: .generateSphere(radius: 0.02),
-            materials: [SimpleMaterial(color: UIColor(hex: 0x1D9E75), isMetallic: false)]
-        )
-        anchor.addChild(sphere)
+        let white = UnlitMaterial(color: .white)
+        let ring = ModelEntity(mesh: Self.makeRingMesh(majorRadius: 0.03, tubeRadius: 0.003), materials: [white])
+        let dot = ModelEntity(mesh: .generateSphere(radius: 0.006), materials: [white])
+        anchor.addChild(ring)
+        anchor.addChild(dot)
         arView.scene.addAnchor(anchor)
         baseAnchor = anchor
         sceneAnchors.append(anchor)
@@ -183,7 +326,7 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         let anchor = AnchorEntity(world: base + SIMD3<Float>(0, height / 2, 0))
         let box = ModelEntity(
             mesh: .generateBox(size: SIMD3<Float>(0.005, height, 0.005)),
-            materials: [SimpleMaterial(color: UIColor(hex: 0x639922), isMetallic: false)]
+            materials: [UnlitMaterial(color: .white)]   // 純正Measureに合わせ白で統一
         )
         anchor.addChild(box)
         arView.scene.addAnchor(anchor)
@@ -217,6 +360,11 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         if anchors.contains(where: { $0 is ARPlaneAnchor }) {
             state = .waitingBase
         }
+    }
+
+    func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        updateReticle()
+        updateGuide(frame: frame)
     }
 }
 

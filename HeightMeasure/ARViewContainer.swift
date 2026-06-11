@@ -10,7 +10,9 @@ struct ARViewContainer: UIViewRepresentable {
         let arView = ARView(frame: .zero)
 
         let configuration = ARWorldTrackingConfiguration()
-        configuration.planeDetection = [.horizontal]
+        // 水平（床）に加え、レティクルを壁にも沿わせるため垂直面も検出する（§7.4）。
+        // ただし底点の確定・計測ボタンの有効化は水平面のみ（§5.1 / §7.4）。
+        configuration.planeDetection = [.horizontal, .vertical]
         configuration.worldAlignment = .gravity
         configuration.environmentTexturing = .none
 
