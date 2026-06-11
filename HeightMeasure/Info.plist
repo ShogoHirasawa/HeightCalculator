@@ -24,6 +24,8 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>ARで高さを計測するためにカメラを使用します。</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>計測結果のスクリーンショットを写真に保存するために使用します。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
