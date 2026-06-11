@@ -30,37 +30,53 @@ struct OverlayView: View {
 
     var body: some View {
         ZStack {
-            // 画面中央レイヤー（レティクル＋ライブガイド）。レイキャスト原点と一致させるため
-            // セーフエリアを無視してフルスクリーン中央に置く。
-            ZStack {
-                // 2Dレティクル（フォールバック）。面に沿うリングは AR 空間側で描画するため、
-                // 何らかの面に乗っている底点選択中は 2D を隠す。
-                if show2DReticle {
-                    reticle
-                }
-                // ライブガイド（§7.6）：地面〜レティクル間の点線・数値・延長線。
-                guideOverlay
+            // ステップ1（計測）: 通常の中央レイヤー＋操作UI。撮影・プレビュー中は隠す。
+            if viewModel.capturedImage == nil && !viewModel.captureMode {
+                centerLayer
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                normalControls
             }
-            .ignoresSafeArea()
-            .allowsHitTesting(false)
 
-            // 操作レイヤー（セーフエリア内）。
-            VStack(spacing: 0) {
-                banner
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
-                Spacer()
-                resultList
-                bottomBar
+            // ステップ2（撮影）: フレーミングガイド＋シャッター。
+            if viewModel.captureMode {
+                captureOverlay
+            }
+
+            // ステップ3（保存/共有）: 撮影画像のプレビュー＋アクション。
+            if let image = viewModel.capturedImage {
+                capturePreview(image)
             }
         }
         // 床にロックした瞬間に軽いハプティクス（§7.4）。状態変化を安定して拾うため最上位に付ける。
         .onChange(of: viewModel.reticleState) { _, newValue in
             if newValue == .locked { Haptics.snap() }
         }
-        // 撮影画像の共有シート（§7.7）。
+        // 共有シート（§7.7）。
         .sheet(item: $viewModel.shareItem) { item in
             ShareSheet(image: item.image)
+        }
+    }
+
+    // 画面中央レイヤー（レティクル＋ライブガイド）。レイキャスト原点と一致させるため全画面中央。
+    private var centerLayer: some View {
+        ZStack {
+            if show2DReticle {
+                reticle
+            }
+            guideOverlay
+        }
+    }
+
+    // 操作レイヤー（セーフエリア内）。
+    private var normalControls: some View {
+        VStack(spacing: 0) {
+            banner
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+            Spacer()
+            resultList
+            bottomBar
         }
     }
 
@@ -215,12 +231,12 @@ struct OverlayView: View {
 
             measureButton
 
-            // 計測が1件以上あるときだけ「共有」（撮影→保存/共有）を出す（§7.7）。
+            // 計測が1件以上あるときだけ「撮影」（→ ステップ2フレーミング）を出す（§7.7）。
             if !viewModel.measurements.isEmpty {
-                sideButton(symbol: "square.and.arrow.up",
-                           label: "共有",
+                sideButton(symbol: "camera",
+                           label: "撮影",
                            enabled: true,
-                           action: { viewModel.captureAndShare() })
+                           action: { viewModel.enterCaptureMode() })
             }
 
             sideButton(symbol: "trash",
@@ -288,6 +304,118 @@ struct OverlayView: View {
         case .initializing: return "hourglass"
         case .waitingBase: return "scope"
         case .waitingTarget: return "arrow.up"
+        }
+    }
+
+    // MARK: - ステップ2: 撮影（フレーミング）オーバーレイ（§7.7）
+    private var captureOverlay: some View {
+        let ready = viewModel.baseInFrame && viewModel.targetInFrame
+        return VStack(spacing: 0) {
+            // 上部ガイド
+            VStack(spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "viewfinder").font(.subheadline.weight(.bold))
+                    Text("地面・対象（建物）・終点が画角に入るように引いて撮影してください")
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.ultraThinMaterial))
+
+                HStack(spacing: 10) {
+                    framingChip(label: "地面", ok: viewModel.baseInFrame)
+                    framingChip(label: "終点", ok: viewModel.targetInFrame)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+
+            Spacer()
+
+            // 下部: キャンセル（左）＋シャッター（中央）
+            ZStack {
+                Button(action: { viewModel.shutter() }) {
+                    ZStack {
+                        Circle().stroke(.white, lineWidth: 4).frame(width: 84, height: 84)
+                        Circle().fill(.white).frame(width: 70, height: 70)
+                    }
+                    .shadow(color: .black.opacity(0.3), radius: 4)
+                }
+                .disabled(!ready)
+                .opacity(ready ? 1.0 : 0.4)
+
+                HStack {
+                    Button(action: { viewModel.exitCaptureMode() }) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 54, height: 54)
+                            .background(Circle().fill(.ultraThinMaterial))
+                    }
+                    Spacer()
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 28)
+        }
+    }
+
+    private func framingChip(label: String, ok: Bool) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: ok ? "checkmark.circle.fill" : "circle")
+            Text(label)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(Capsule().stroke(ok ? accent : .white.opacity(0.5), lineWidth: 1.5))
+    }
+
+    // MARK: - ステップ3: 撮影プレビュー＋保存/共有（§7.7）
+    private func capturePreview(_ image: UIImage) -> some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(spacing: 16) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .padding(.horizontal, 12)
+                HStack(spacing: 14) {
+                    previewButton("撮り直す", "arrow.counterclockwise") { viewModel.retake() }
+                    previewButton("保存", "square.and.arrow.down") { viewModel.saveCaptured() }
+                    previewButton("共有", "square.and.arrow.up") { viewModel.shareCaptured() }
+                    previewButton("閉じる", "xmark") { viewModel.dismissCaptured() }
+                }
+                .padding(.bottom, 8)
+            }
+            if viewModel.savedToastVisible {
+                Text("写真に保存しました")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Capsule().fill(.black.opacity(0.7)))
+            }
+        }
+    }
+
+    private func previewButton(_ label: String, _ symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 5) {
+                Image(systemName: symbol)
+                    .font(.system(size: 20, weight: .semibold))
+                    .frame(width: 52, height: 52)
+                    .background(Circle().fill(.ultraThinMaterial))
+                Text(label)
+                    .font(.caption2.weight(.medium))
+            }
+            .foregroundStyle(.white)
         }
     }
 }

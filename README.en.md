@@ -24,7 +24,7 @@ Valid conditions: `f_h >= 0.05` (not aimed too close to straight up) and `fy > 0
 - Multiple measurements per session, accumulated in a numbered list at the bottom (newest on top).
 - **Surface-conforming reticle**: an Apple Measure-style reticle (a white ring in AR space) tilts to lie on the surface it hits — flat on floors, upright on walls. The base point (①) only enables the measure button on a horizontal floor, preventing accidental selection of a wall.
 - **Live guide**: after the base is set, while aiming at the target, a dotted line from the ground to the reticle, a live height value (cm/m), and an extension line are shown in real time.
-- **Save & share**: after measuring, snapshot the AR view, composite the height value onto the line, and save/share the photo via the system share sheet (ground, target, vertical line, and number all in one shot).
+- **Capture → save/share (3 steps)**: ① measure → ② capture mode (a framing guide turns green ✓ once the ground and endpoint are in frame, then shutter) → ③ preview to save (camera roll) or share. The height value is composited onto the photo, so ground, target, vertical line, and number all fit in one shot.
 - Redo (discard the last base point while in `.waitingTarget`).
 - Clear (remove all results and the AR markers/vertical lines, reset numbering).
 - Measurements are not persisted (discarded when the app exits; saved photos remain in the camera roll).

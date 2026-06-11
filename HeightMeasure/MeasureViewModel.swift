@@ -48,6 +48,16 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published private(set) var liveHeightMeters: Double? = nil
     /// 撮影・共有（§7.7）。非nilの間、共有シートを表示する。dismiss 時に nil へ戻す。
     @Published var shareItem: ShareItem? = nil
+    /// 撮影フロー（§7.7）。ステップ2: フレーミング（撮影）モードか。
+    @Published private(set) var captureMode: Bool = false
+    /// 撮影フロー（§7.7）。ステップ3: 撮影済み画像（非nilでプレビュー＋保存/共有を表示）。
+    @Published var capturedImage: UIImage? = nil
+    /// 撮影ガイド（§7.7）。最新計測の底点が画角（余白付き）に入っているか。
+    @Published private(set) var baseInFrame: Bool = false
+    /// 撮影ガイド（§7.7）。最新計測の終点が画角（余白付き）に入っているか。
+    @Published private(set) var targetInFrame: Bool = false
+    /// 撮影フロー（§7.7）。「写真に保存しました」トーストの表示。
+    @Published private(set) var savedToastVisible: Bool = false
 
     // MARK: - AR 参照・内部状態
     private weak var arView: ARView?
@@ -59,6 +69,7 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     private var nextIndex: Int = 1
     private var errorToken: Int = 0
     private var highlightToken: Int = 0
+    private var savedToastToken: Int = 0
     /// 床に沿って配置するレティクル本体（§7.4）。白いリング＋中心点を、十字が指す床位置に
     /// 置き、床面に寝かせて表示する（見る角度で楕円に傾く＝純正「計測」アプリ風）。
     private var reticleEntity: Entity?
@@ -347,30 +358,89 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         sceneAnchors.append(anchor)
     }
 
-    // MARK: - 撮影・共有（§7.7）
-    /// 現在のARビューを撮影し、各計測の高さ数値を線の中点に合成して、共有シートで保存・共有する。
-    /// 線・底点はARエンティティのためスナップショットに写る。数値ピルとUIは別途扱う（数値のみ合成）。
-    func captureAndShare() {
-        guard let arView, !measurements.isEmpty else { return }
+    // MARK: - 撮影フロー（§7.7） ステップ②撮影 → ③保存/共有
 
-        // 撮影フレームに合わせて各計測の数値ピル位置（線の中点）を投影しておく。
+    /// ステップ② 撮影（フレーミング）モードに入る。照準リングは隠す。
+    func enterCaptureMode() {
+        guard !measurements.isEmpty else { return }
+        captureMode = true
+        suppressReticle = true
+        reticleEntity?.isEnabled = false
+    }
+
+    /// 撮影モードを抜ける（キャンセル）。
+    func exitCaptureMode() {
+        captureMode = false
+        suppressReticle = false
+        baseInFrame = false
+        targetInFrame = false
+    }
+
+    /// シャッター: ARビューを撮影し、各計測の高さ数値を線の中点に合成して、ステップ③へ。
+    func shutter() {
+        guard let arView, !measurements.isEmpty else { return }
         let labels: [(point: CGPoint, text: String)] = measurements.compactMap { m in
             let mid = m.base + SIMD3<Float>(0, Float(m.heightMeters) / 2, 0)
             guard let p = arView.project(mid), arView.bounds.contains(p) else { return nil }
             return (p, String(format: "%.2f m", m.heightMeters))
         }
-
-        // 照準リングを隠してから撮影（清潔なスクショのため）。
-        suppressReticle = true
-        reticleEntity?.isEnabled = false
         arView.snapshot(saveToHDR: false) { [weak self] image in
             guard let self else { return }
             DispatchQueue.main.async {
+                self.captureMode = false
                 self.suppressReticle = false
                 guard let image else { return }
-                self.shareItem = ShareItem(image: Self.composite(image, labels: labels))
+                self.capturedImage = Self.composite(image, labels: labels)
             }
         }
+    }
+
+    /// ステップ③ 撮り直す（撮影モードへ戻る）。
+    func retake() {
+        capturedImage = nil
+        enterCaptureMode()
+    }
+
+    /// ステップ③ 写真に保存（カメラロール）。
+    func saveCaptured() {
+        guard let image = capturedImage else { return }
+        UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil)
+        showSavedToast()
+    }
+
+    /// ステップ③ 共有シートを表示。
+    func shareCaptured() {
+        guard let image = capturedImage else { return }
+        shareItem = ShareItem(image: image)
+    }
+
+    /// ステップ③ プレビューを閉じて通常画面へ戻る。
+    func dismissCaptured() {
+        capturedImage = nil
+    }
+
+    private func showSavedToast() {
+        savedToastToken += 1
+        let token = savedToastToken
+        savedToastVisible = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self, self.savedToastToken == token else { return }
+            self.savedToastVisible = false
+        }
+    }
+
+    /// 撮影モード中、最新計測の底点・終点が画角（余白付き）に入っているかを毎フレーム判定する。
+    private func updateFraming() {
+        guard captureMode, let arView, let m = measurements.first else {
+            if baseInFrame { baseInFrame = false }
+            if targetInFrame { targetInFrame = false }
+            return
+        }
+        let frame = arView.bounds.insetBy(dx: 24, dy: 24)   // 余白を持たせて背景も入るように
+        let b = arView.project(m.base).map { frame.contains($0) } ?? false
+        let t = arView.project(m.base + SIMD3<Float>(0, Float(m.heightMeters), 0)).map { frame.contains($0) } ?? false
+        if b != baseInFrame { baseInFrame = b }
+        if t != targetInFrame { targetInFrame = t }
     }
 
     /// スナップショットに数値ピル（白いカプセル＋黒文字、純正Measure風）を合成する。
@@ -432,6 +502,7 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         updateReticle()
         updateGuide(frame: frame)
+        updateFraming()
     }
 }
 
