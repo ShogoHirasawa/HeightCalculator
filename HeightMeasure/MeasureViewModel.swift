@@ -58,7 +58,7 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     // MARK: - エラー文言（§8）
     private let messageFloorNotFound = "床が検出できません。地面を映してから再度お試しください"
     private let messageTooSteep = "角度が急すぎます。少し下げて対象に合わせてください"
-    private let messageTargetBelow = "対象はスマホより上に合わせてください"
+    private let messageTooLow = "対象が低すぎます。底点より上を狙ってください"
     private let messageTracking = "動かさずに少し待ってください（トラッキング調整中）"
 
     // MARK: - セットアップ
@@ -252,17 +252,19 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         let height = HeightCalculator.height(camera: SIMD3<Double>(camera),
                                              forward: SIMD3<Double>(forward),
                                              base: SIMD3<Double>(base))
-        liveHeightMeters = height
+        // 見下ろし（カメラより低い対象）でも数値を出す。負の高さ（底点より下を狙った）だけ除外。
+        let validHeight = (height ?? -1) > 0 ? height : nil
+        liveHeightMeters = validHeight
         projectedBase = arView.project(base)
         // 終点は B の鉛直線上（高さ H）に拘束する。これにより左右に振れても線は常に垂直。
-        if let height {
-            projectedTarget = arView.project(base + SIMD3<Float>(0, Float(height), 0))
+        if let validHeight {
+            projectedTarget = arView.project(base + SIMD3<Float>(0, Float(validHeight), 0))
         } else {
             projectedTarget = nil
         }
-        // 鉛直リファレンス線の上端。角度が無効（カメラ未上昇）でも線を常時表示するため、
+        // 鉛直リファレンス線の上端。数値が出ない極端な角度でも線を常時表示するため、
         // 暫定高さ＋余白か最低0.6mのうち高い方まで伸ばす。
-        let refHeight = max(Float(height ?? 0) + 0.3, 0.6)
+        let refHeight = max(Float(validHeight ?? 0) + 0.3, 0.6)
         projectedReferenceTop = arView.project(base + SIMD3<Float>(0, refHeight, 0))
     }
 
@@ -280,15 +282,16 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
             showError(messageTooSteep)
             return
         }
-        if forward.y <= 0 {
-            showError(messageTargetBelow)
-            return
-        }
 
         guard let H = HeightCalculator.height(camera: SIMD3<Double>(camera),
                                               forward: SIMD3<Double>(forward),
                                               base: SIMD3<Double>(base)) else {
             showError(messageTooSteep)
+            return
+        }
+        // 見下ろしでも測れるが、底点と同じか下（H<=0）は高さとして無効。
+        guard H > 0 else {
+            showError(messageTooLow)
             return
         }
 
