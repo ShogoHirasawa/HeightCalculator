@@ -314,7 +314,7 @@ struct OverlayView: View {
 
                 HStack(spacing: 10) {
                     framingChip(label: "地面", ok: viewModel.baseInFrame)
-                    framingChip(label: "終点", ok: viewModel.targetInFrame)
+                    framingChip(label: "ベランダ", ok: viewModel.targetInFrame)
                 }
             }
             .padding(.horizontal, 16)
@@ -359,8 +359,11 @@ struct OverlayView: View {
         .foregroundStyle(.white)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().stroke(ok ? accent : .white.opacity(0.5), lineWidth: 1.5))
+        // 判定OKでチップ自体を緑に塗りつぶす（線ではなく面で分かりやすく）。未判定はマテリアル。
+        .background(
+            Capsule().fill(ok ? AnyShapeStyle(accent) : AnyShapeStyle(.ultraThinMaterial))
+        )
+        .animation(.easeInOut(duration: 0.15), value: ok)
     }
 
     // MARK: - ステップ3: 撮影プレビュー＋保存/共有（§7.7）
