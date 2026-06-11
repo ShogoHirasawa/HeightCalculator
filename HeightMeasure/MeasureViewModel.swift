@@ -15,6 +15,12 @@ enum ReticleState {
     case locked
 }
 
+/// 共有シート（§7.7）に渡す撮影画像。`.sheet(item:)` 用に Identifiable。
+struct ShareItem: Identifiable {
+    let id = UUID()
+    let image: UIImage
+}
+
 /// 仕様書 §6・§5・§8 を担う ObservableObject 兼 ARSessionDelegate（§9）。
 @MainActor
 final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
@@ -40,6 +46,8 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published private(set) var projectedReferenceTop: CGPoint? = nil
     /// ライブガイド（§7.6）。現在のカメラ角度から算出した暫定の高さ（m）。無効角度のとき nil。
     @Published private(set) var liveHeightMeters: Double? = nil
+    /// 撮影・共有（§7.7）。非nilの間、共有シートを表示する。dismiss 時に nil へ戻す。
+    @Published var shareItem: ShareItem? = nil
 
     // MARK: - AR 参照・内部状態
     private weak var arView: ARView?
@@ -54,6 +62,8 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     /// 床に沿って配置するレティクル本体（§7.4）。白いリング＋中心点を、十字が指す床位置に
     /// 置き、床面に寝かせて表示する（見る角度で楕円に傾く＝純正「計測」アプリ風）。
     private var reticleEntity: Entity?
+    /// 撮影中はレティクルを隠す（§7.7）。スナップショットに照準リングを写さないため。
+    private var suppressReticle = false
 
     // MARK: - エラー文言（§8）
     private let messageFloorNotFound = "床が検出できません。地面を映してから再度お試しください"
@@ -218,6 +228,10 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     /// その面に沿って配置する。床（水平）に当たった時だけ reticleState を locked/approximate にし、
     /// 壁（垂直）や未ヒットは off（計測ボタン無効）とする。
     private func updateReticle() {
+        guard !suppressReticle else {
+            reticleEntity?.isEnabled = false
+            return
+        }
         guard state == .waitingBase, let arView, let result = raycast(arView, alignment: .any) else {
             if reticleState != .off { reticleState = .off }
             if isReticleOnSurface { isReticleOnSurface = false }
@@ -297,7 +311,7 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
 
         drawVerticalLine(from: base, height: Float(H))
 
-        let measurement = Measurement(id: UUID(), index: nextIndex, heightMeters: H)
+        let measurement = Measurement(id: UUID(), index: nextIndex, heightMeters: H, base: base)
         nextIndex += 1
         measurements.insert(measurement, at: 0)
         highlight(measurement.id)
@@ -331,6 +345,59 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         anchor.addChild(box)
         arView.scene.addAnchor(anchor)
         sceneAnchors.append(anchor)
+    }
+
+    // MARK: - 撮影・共有（§7.7）
+    /// 現在のARビューを撮影し、各計測の高さ数値を線の中点に合成して、共有シートで保存・共有する。
+    /// 線・底点はARエンティティのためスナップショットに写る。数値ピルとUIは別途扱う（数値のみ合成）。
+    func captureAndShare() {
+        guard let arView, !measurements.isEmpty else { return }
+
+        // 撮影フレームに合わせて各計測の数値ピル位置（線の中点）を投影しておく。
+        let labels: [(point: CGPoint, text: String)] = measurements.compactMap { m in
+            let mid = m.base + SIMD3<Float>(0, Float(m.heightMeters) / 2, 0)
+            guard let p = arView.project(mid), arView.bounds.contains(p) else { return nil }
+            return (p, String(format: "%.2f m", m.heightMeters))
+        }
+
+        // 照準リングを隠してから撮影（清潔なスクショのため）。
+        suppressReticle = true
+        reticleEntity?.isEnabled = false
+        arView.snapshot(saveToHDR: false) { [weak self] image in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                self.suppressReticle = false
+                guard let image else { return }
+                self.shareItem = ShareItem(image: Self.composite(image, labels: labels))
+            }
+        }
+    }
+
+    /// スナップショットに数値ピル（白いカプセル＋黒文字、純正Measure風）を合成する。
+    private static func composite(_ base: UIImage, labels: [(point: CGPoint, text: String)]) -> UIImage {
+        let renderer = UIGraphicsImageRenderer(size: base.size)
+        return renderer.image { ctx in
+            base.draw(at: .zero)
+            let cg = ctx.cgContext
+            let font = UIFont.systemFont(ofSize: 16, weight: .semibold)
+            let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.black]
+            for label in labels {
+                let textSize = (label.text as NSString).size(withAttributes: attrs)
+                let padH: CGFloat = 11, padV: CGFloat = 6
+                let pillW = textSize.width + padH * 2
+                let pillH = textSize.height + padV * 2
+                let rect = CGRect(x: label.point.x - pillW / 2, y: label.point.y - pillH / 2,
+                                  width: pillW, height: pillH)
+                cg.saveGState()
+                cg.setShadow(offset: CGSize(width: 0, height: 1), blur: 3,
+                             color: UIColor.black.withAlphaComponent(0.3).cgColor)
+                UIColor.white.setFill()
+                UIBezierPath(roundedRect: rect, cornerRadius: pillH / 2).fill()
+                cg.restoreGState()
+                (label.text as NSString).draw(at: CGPoint(x: rect.minX + padH, y: rect.minY + padV),
+                                              withAttributes: attrs)
+            }
+        }
     }
 
     // MARK: - フィードバック

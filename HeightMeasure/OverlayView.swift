@@ -9,6 +9,15 @@ enum Haptics {
     }
 }
 
+/// 標準の共有シート（§7.7）。保存（カメラロール）も各アプリへの共有もここから行える。
+struct ShareSheet: UIViewControllerRepresentable {
+    let image: UIImage
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [image], applicationActivities: nil)
+    }
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+}
+
 /// SwiftUI オーバーレイ（§7・§9）。Apple HIG 準拠の見た目（マテリアル背景・SF Symbols・
 /// カプセルボタン）で、レティクル・バナー・床ロックガイド・結果リスト・3 ボタンを描画する。
 struct OverlayView: View {
@@ -48,6 +57,10 @@ struct OverlayView: View {
         // 床にロックした瞬間に軽いハプティクス（§7.4）。状態変化を安定して拾うため最上位に付ける。
         .onChange(of: viewModel.reticleState) { _, newValue in
             if newValue == .locked { Haptics.snap() }
+        }
+        // 撮影画像の共有シート（§7.7）。
+        .sheet(item: $viewModel.shareItem) { item in
+            ShareSheet(image: item.image)
         }
     }
 
@@ -201,6 +214,14 @@ struct OverlayView: View {
                        action: { viewModel.redoTapped() })
 
             measureButton
+
+            // 計測が1件以上あるときだけ「共有」（撮影→保存/共有）を出す（§7.7）。
+            if !viewModel.measurements.isEmpty {
+                sideButton(symbol: "square.and.arrow.up",
+                           label: "共有",
+                           enabled: true,
+                           action: { viewModel.captureAndShare() })
+            }
 
             sideButton(symbol: "trash",
                        label: "クリア",
