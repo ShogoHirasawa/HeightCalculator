@@ -303,7 +303,7 @@ struct OverlayView: View {
             VStack(spacing: 10) {
                 HStack(spacing: 8) {
                     Image(systemName: "viewfinder").font(.subheadline.weight(.bold))
-                    Text("引いて全体を画角に入れて撮影")
+                    Text("高さ・家の外観を画角に入れて撮影")
                 }
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.white)
