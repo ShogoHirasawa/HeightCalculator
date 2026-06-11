@@ -78,6 +78,8 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     /// 床に沿って配置するレティクル本体（§7.4）。白いリング＋中心点を、十字が指す床位置に
     /// 置き、床面に寝かせて表示する（見る角度で楕円に傾く＝純正「計測」アプリ風）。
     private var reticleEntity: Entity?
+    /// レティクルを載せるアンカー（クリア時に作り直せるよう参照を保持）。
+    private var reticleAnchor: AnchorEntity?
     /// 撮影中はレティクルを隠す（§7.7）。スナップショットに照準リングを写さないため。
     private var suppressReticle = false
 
@@ -110,6 +112,17 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         anchor.addChild(parent)
         arView.scene.addAnchor(anchor)
         reticleEntity = parent
+        reticleAnchor = anchor
+    }
+
+    /// レティクルを作り直す（§7.4 バグ修正）。クリアで計測アンカーを消した後、3Dレティクルが
+    /// 再描画されず消えることがあるため、アンカーごと作り直してクリーンに復帰させる。
+    private func recreateReticle() {
+        guard let arView else { return }
+        if let reticleAnchor { arView.scene.removeAnchor(reticleAnchor) }
+        reticleEntity = nil
+        reticleAnchor = nil
+        setupReticleEntity(in: arView)
     }
 
     /// 床に寝かせて表示するリング（トーラス）メッシュを生成する。XZ平面に水平に作る。
@@ -179,6 +192,8 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     /// クリアボタン押下（§7.1-5）。
     func clearTapped() {
         clearScene()
+        // 計測アンカー削除後に3Dレティクルが消えることがあるため、作り直して確実に復帰させる。
+        recreateReticle()
         // 水平面は検出済みのため waitingBase に戻す。
         if state != .initializing {
             state = .waitingBase
@@ -196,6 +211,9 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         measurements.removeAll()
         nextIndex = 1
         measurementOverlay = nil
+        // レティクル状態をリセット（直後は2Dフォールバックが出るようにし、表示の空白を防ぐ）。
+        if isReticleOnSurface { isReticleOnSurface = false }
+        if reticleState != .off { reticleState = .off }
     }
 
     /// やり直しボタン押下（§7.1-6）。.waitingTarget のときのみ有効。
