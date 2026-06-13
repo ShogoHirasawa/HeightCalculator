@@ -44,6 +44,13 @@ struct OverlayView: View {
                     .allowsHitTesting(false)
             }
 
+            // 窓枠の寸法ラベル（§4.2）。確定後・撮影中とも、幅/高さ/対角を線上に常時表示。
+            if viewModel.capturedImage == nil, !viewModel.windowLabels.isEmpty {
+                windowLabelsOverlay
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
+
             // ステップ2（撮影）: フレーミングガイド＋シャッター。
             if viewModel.captureMode {
                 captureOverlay
@@ -82,28 +89,74 @@ struct OverlayView: View {
                 .padding(.top, 8)
             Spacer()
             bottomBar
+            modeSwitcher
+                .padding(.bottom, 10)
         }
+    }
+
+    // 計測モード切替（§3）。下部のセグメント [高さ][窓枠]。
+    private var modeSwitcher: some View {
+        HStack(spacing: 4) {
+            ForEach([MeasureMode.height, MeasureMode.window], id: \.self) { m in
+                let selected = viewModel.mode == m
+                Button(action: { viewModel.setMode(m) }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: m.symbol)
+                        Text(m.title)
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(selected ? .white : .white.opacity(0.75))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Capsule().fill(selected ? AnyShapeStyle(accent) : AnyShapeStyle(Color.clear)))
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(4)
+        .background(Capsule().fill(.ultraThinMaterial))
+        .overlay(Capsule().stroke(.white.opacity(0.12), lineWidth: 1))
+        .frame(maxWidth: 240)
+        .animation(.easeInOut(duration: 0.15), value: viewModel.mode)
     }
 
     // 確定した計測の数値ピル（純正Measure風：白カプセル＋黒文字）を線の中点に置く（§7.6）。
     private func measurementNumber(_ overlay: MeasurementOverlay) -> some View {
         ZStack {
-            Text(overlay.text)
-                .font(.footnote.weight(.semibold))
-                .monospacedDigit()
-                .foregroundStyle(.black)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(.white))
-                .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
-                .position(overlay.mid)
+            numberPill(overlay.text).position(overlay.mid)
         }
+    }
+
+    // 窓枠の寸法ラベル（幅/高さ/対角）を各位置に置く（§4.2）。
+    private var windowLabelsOverlay: some View {
+        ZStack {
+            ForEach(viewModel.windowLabels) { label in
+                numberPill(label.text).position(label.point)
+            }
+        }
+    }
+
+    // 純正Measure風の白カプセル＋黒文字ピル（数値表示の共通部品）。
+    private func numberPill(_ text: String) -> some View {
+        Text(text)
+            .font(.footnote.weight(.semibold))
+            .monospacedDigit()
+            .foregroundStyle(.black)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(.white))
+            .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
     }
 
     /// 2Dレティクルを表示するか。
     /// - 底点選択中: 面へ乗っている時は AR の面リングに任せて隠す。
     /// - 対象捕捉中: 鉛直リファレンス線を出せている間は隠す（鉛直ガイドに注目させる）。
     private var show2DReticle: Bool {
+        if viewModel.mode == .window {
+            // 角を置ける段階で、壁に乗っていない時だけ2Dフォールバックを出す。
+            return viewModel.windowState.canPlace && !viewModel.isReticleOnSurface
+        }
         switch viewModel.state {
         case .waitingBase:
             return !viewModel.isReticleOnSurface
@@ -172,8 +225,9 @@ struct OverlayView: View {
         .shadow(color: .black.opacity(0.4), radius: 2)
     }
 
-    /// 状態に応じた不透明度。床を捉えていない探索中や初期化中はやや薄く。
+    /// 状態に応じた不透明度。面を捉えていない探索中や初期化中はやや薄く。
     private var reticleOpacity: Double {
+        if viewModel.mode == .window { return 0.75 }   // 壁を探している（off）時のみ表示
         switch viewModel.state {
         case .initializing:
             return 0.5
@@ -185,9 +239,33 @@ struct OverlayView: View {
     }
 
     // MARK: - 上部バナー（§7.1-2 / §7.2 / §8）
+
+    /// モード別のバナー文言。
+    private var bannerText: String {
+        if let err = viewModel.errorMessage { return err }
+        switch viewModel.mode {
+        case .height:
+            return viewModel.state.bannerText
+        case .window:
+            switch viewModel.windowState {
+            case .placing(let n):
+                if n == 0 && viewModel.reticleState == .off {
+                    return "窓のある壁を映してください"
+                }
+                let corner = WindowState.cornerLabels[n]
+                return "窓枠の\(corner)の角に合わせてボタンを押してください"
+            case .done:
+                if let s = viewModel.windowResult {
+                    return "幅 \(HeightFormat.string(s.width)) × 高さ \(HeightFormat.string(s.height))（対角 \(HeightFormat.string(s.diagonal))）"
+                }
+                return "計測しました"
+            }
+        }
+    }
+
     private var banner: some View {
         let isError = viewModel.errorMessage != nil
-        let text = viewModel.errorMessage ?? viewModel.state.bannerText
+        let text = bannerText
         return HStack(spacing: 8) {
             Image(systemName: isError ? "exclamationmark.triangle.fill" : "viewfinder")
                 .font(.subheadline.weight(.bold))
@@ -212,13 +290,13 @@ struct OverlayView: View {
         HStack(alignment: .center, spacing: 16) {
             sideButton(symbol: "arrow.uturn.backward",
                        label: "やり直し",
-                       enabled: viewModel.state.isRedoButtonEnabled,
+                       enabled: viewModel.isRedoEnabled,
                        action: { viewModel.redoTapped() })
 
             measureButton
 
-            // 計測が1件以上あるときだけ「撮影」（→ ステップ2フレーミング）を出す（§7.7）。
-            if !viewModel.measurements.isEmpty {
+            // 撮影できる状態（高さ: 計測済み / 窓枠: 4点確定）のとき「撮影」を出す（§7.7）。
+            if viewModel.canCapture {
                 sideButton(symbol: "camera",
                            label: "撮影",
                            enabled: true,
@@ -232,16 +310,30 @@ struct OverlayView: View {
         }
         .padding(.horizontal, 20)
         .padding(.top, 10)
-        .padding(.bottom, 20)
+        .padding(.bottom, 8)
+    }
+
+    /// 計測ボタンのラベル（モード別）。
+    private var measureLabel: String {
+        switch viewModel.mode {
+        case .height:
+            return (viewModel.state == .waitingBase && !viewModel.measurements.isEmpty)
+                ? "再計測する" : viewModel.state.buttonLabel
+        case .window:
+            switch viewModel.windowState {
+            case .placing(let n):
+                return "\(["①", "②", "③", "④"][n]) \(WindowState.cornerLabels[n])"
+            case .done:
+                return "計測完了"
+            }
+        }
     }
 
     private var measureButton: some View {
         Button(action: { viewModel.measureTapped() }) {
             HStack(spacing: 8) {
                 Image(systemName: measureSymbol)
-                Text(viewModel.state == .waitingBase && !viewModel.measurements.isEmpty
-                     ? "再計測する"
-                     : viewModel.state.buttonLabel)
+                Text(measureLabel)
             }
             .font(.headline.weight(.bold))
             .foregroundStyle(.white)
@@ -274,36 +366,48 @@ struct OverlayView: View {
         .disabled(!enabled)
     }
 
-    // MARK: - 計測ボタンの有効判定（§7.4 床ロックガード）
+    // MARK: - 計測ボタンの有効判定（§7.4 面ロックガード）
     private var isMeasureEnabled: Bool {
-        switch viewModel.state {
-        case .initializing:
-            return false
-        case .waitingBase:
-            // 床を捉えているとき（off 以外）だけ有効にして、壁などの誤選択を防ぐ。
-            return viewModel.reticleState != .off
-        case .waitingTarget:
-            return true
+        switch viewModel.mode {
+        case .height:
+            switch viewModel.state {
+            case .initializing:
+                return false
+            case .waitingBase:
+                // 床を捉えているとき（off 以外）だけ有効にして、壁などの誤選択を防ぐ。
+                return viewModel.reticleState != .off
+            case .waitingTarget:
+                return true
+            }
+        case .window:
+            // 角を置ける段階で、壁を捉えている時だけ有効。
+            return viewModel.windowState.canPlace && viewModel.reticleState != .off
         }
     }
 
     private var measureSymbol: String {
-        switch viewModel.state {
-        case .initializing: return "hourglass"
-        case .waitingBase: return "scope"
-        case .waitingTarget: return "arrow.up"
+        switch viewModel.mode {
+        case .height:
+            switch viewModel.state {
+            case .initializing: return "hourglass"
+            case .waitingBase: return "scope"
+            case .waitingTarget: return "arrow.up"
+            }
+        case .window:
+            return viewModel.windowState == .done ? "checkmark" : "scope"
         }
     }
 
     // MARK: - ステップ2: 撮影（フレーミング）オーバーレイ（§7.7）
     private var captureOverlay: some View {
-        let ready = viewModel.baseInFrame && viewModel.targetInFrame
+        let ready = viewModel.captureReady
+        let guideText = viewModel.mode == .height ? "高さ・家の外観を画角に入れて撮影" : "窓枠の全体を画角に入れて撮影"
         return VStack(spacing: 0) {
             // 上部ガイド（文言は最小限。詳細はチップで示す）
             VStack(spacing: 10) {
                 HStack(spacing: 8) {
                     Image(systemName: "viewfinder").font(.subheadline.weight(.bold))
-                    Text("高さ・家の外観を画角に入れて撮影")
+                    Text(guideText)
                 }
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.white)
@@ -313,8 +417,12 @@ struct OverlayView: View {
                 .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.ultraThinMaterial))
 
                 HStack(spacing: 10) {
-                    framingChip(label: "地面", ok: viewModel.baseInFrame)
-                    framingChip(label: "ベランダ", ok: viewModel.targetInFrame)
+                    if viewModel.mode == .height {
+                        framingChip(label: "地面", ok: viewModel.baseInFrame)
+                        framingChip(label: "ベランダ", ok: viewModel.targetInFrame)
+                    } else {
+                        framingChip(label: "窓枠", ok: viewModel.windowInFrame)
+                    }
                 }
             }
             .padding(.horizontal, 16)
