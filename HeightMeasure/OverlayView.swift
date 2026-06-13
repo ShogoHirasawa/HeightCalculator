@@ -44,6 +44,13 @@ struct OverlayView: View {
                     .allowsHitTesting(false)
             }
 
+            // 窓枠の内側塗り（§4.4）。寸法ラベルより下（先）に重ねて計測範囲を明示。
+            if viewModel.capturedImage == nil, let quad = viewModel.windowQuad {
+                windowFillOverlay(quad)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
+
             // 窓枠の寸法ラベル（§4.2）。確定後・撮影中とも、幅/高さ/対角を線上に常時表示。
             if viewModel.capturedImage == nil, !viewModel.windowLabels.isEmpty {
                 windowLabelsOverlay
@@ -126,6 +133,17 @@ struct OverlayView: View {
         ZStack {
             numberPill(overlay.text).position(overlay.mid)
         }
+    }
+
+    // 窓枠の内側を控えめにグレーアウト（§4.4）。新しい色相は足さず黒の低不透明度で範囲を明示。
+    private func windowFillOverlay(_ quad: [CGPoint]) -> some View {
+        Path { p in
+            guard let first = quad.first else { return }
+            p.move(to: first)
+            for pt in quad.dropFirst() { p.addLine(to: pt) }
+            p.closeSubpath()
+        }
+        .fill(Color.black.opacity(0.22))
     }
 
     // 窓枠の寸法ラベル（幅/高さ/対角）を各位置に置く（§4.2）。

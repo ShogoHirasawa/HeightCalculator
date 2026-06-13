@@ -81,6 +81,8 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published private(set) var windowResult: WindowSize? = nil
     /// 窓枠の寸法ラベル（§4.2）。確定後に幅/高さ/対角を画面投影して常時表示する。
     @Published private(set) var windowLabels: [ProjectedLabel] = []
+    /// 窓枠の四隅を画面投影した点（時計回り）。確定後に内側を塗る（§4.4）。4点そろう時のみ非nil。
+    @Published private(set) var windowQuad: [CGPoint]? = nil
     /// 撮影ガイド（窓枠）。四隅すべてが画角（余白付き）に入っているか。
     @Published private(set) var windowInFrame: Bool = false
 
@@ -553,14 +555,18 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         if reticleState != .off { reticleState = .off }
     }
 
-    /// 確定後、窓枠の寸法ラベル（幅/高さ/対角）を毎フレーム画面投影する（§4.2 常時表示）。
+    /// 確定後、窓枠の寸法ラベル（幅/高さ/対角）と内側塗り用の四隅投影を毎フレーム更新する（§4.2/§4.4）。
     private func updateWindowLabels() {
         guard mode == .window, capturedImage == nil,
               windowState == .done, windowCorners.count == 4, let arView, let size = windowResult else {
             if !windowLabels.isEmpty { windowLabels = [] }
+            if windowQuad != nil { windowQuad = nil }
             return
         }
         let tl = windowCorners[0], tr = windowCorners[1], br = windowCorners[2], bl = windowCorners[3]
+        // 内側塗り用: 四隅すべてが投影できるときだけ quad を出す。
+        let projected = windowCorners.compactMap { arView.project($0) }
+        windowQuad = projected.count == 4 ? projected : nil
         var labels: [ProjectedLabel] = []
         // 幅: 上辺の中点
         if let p = arView.project((tl + tr) / 2) {
@@ -612,18 +618,24 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         windowInFrame = false
     }
 
-    /// シャッター: ARビューを撮影し、寸法ラベルを合成してステップ③へ。
+    /// シャッター: ARビューを撮影し、寸法ラベル（と窓枠の内側塗り）を合成してステップ③へ。
     func shutter() {
         guard let arView else { return }
         let viewSize = arView.bounds.size
         let labels = currentCompositeLabels(arView)
+        // 窓枠モードでは内側の塗りも合成する。
+        let fill: [CGPoint]? = {
+            guard mode == .window, windowState == .done, windowCorners.count == 4 else { return nil }
+            let q = windowCorners.compactMap { arView.project($0) }
+            return q.count == 4 ? q : nil
+        }()
         arView.snapshot(saveToHDR: false) { [weak self] image in
             guard let self else { return }
             DispatchQueue.main.async {
                 self.captureMode = false
                 self.suppressReticle = false
                 guard let image else { return }
-                self.capturedImage = Self.composite(image, viewSize: viewSize, labels: labels)
+                self.capturedImage = Self.composite(image, viewSize: viewSize, labels: labels, fill: fill)
             }
         }
     }
@@ -703,16 +715,28 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
-    /// スナップショットに数値ピル（白いカプセル＋黒文字、純正Measure風）を線の中点へ合成する。
+    /// スナップショットに、窓枠の内側塗り（任意）と数値ピル（白いカプセル＋黒文字）を合成する。
     /// 投影座標はビュー（ポイント）系のため、スナップショット画像サイズとの比 `scale` で位置・寸法を補正する
     /// （これを行わないと数値が画像の隅に小さく描かれる）。
     private static func composite(_ base: UIImage, viewSize: CGSize,
-                                  labels: [(point: CGPoint, text: String)]) -> UIImage {
+                                  labels: [(point: CGPoint, text: String)],
+                                  fill: [CGPoint]? = nil) -> UIImage {
         let scale = viewSize.width > 0 ? base.size.width / viewSize.width : 1
         let renderer = UIGraphicsImageRenderer(size: base.size)
         return renderer.image { ctx in
             base.draw(at: .zero)
             let cg = ctx.cgContext
+
+            // 窓枠の内側を控えめにグレーアウト（§4.4）。ラベルより先（下）に描く。
+            if let fill, fill.count == 4 {
+                let path = UIBezierPath()
+                path.move(to: CGPoint(x: fill[0].x * scale, y: fill[0].y * scale))
+                for p in fill.dropFirst() { path.addLine(to: CGPoint(x: p.x * scale, y: p.y * scale)) }
+                path.close()
+                UIColor.black.withAlphaComponent(0.22).setFill()
+                path.fill()
+            }
+
             let font = UIFont.systemFont(ofSize: 16 * scale, weight: .semibold)
             let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.black]
             for label in labels {

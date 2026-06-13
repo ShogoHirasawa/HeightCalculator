@@ -73,6 +73,12 @@ diag2  = d(TR, BL)
 ### 4.3 純関数化（テスト用）
 上記計算を、4点 `SIMD3<Double>` を受け取り `WindowSize(width,height,diagonal)` を返す純粋関数 `WindowCalculator.size(topLeft:topRight:bottomRight:bottomLeft:) -> WindowSize` として切り出す（ARKit/RealityKit 非依存、`simd` のみ）。これを§11のユニットテストで検証する。
 
+### 4.4 内側の可視化（計測範囲のグレーアウト）
+確定後（4点）、囲った四角形の**内側を控えめにグレーアウト**して計測範囲を一目で分かるようにする。
+- 四隅を `ARView.project(_:)` で投影した四角形（時計回り）を**黒・不透明度0.22**で塗る（新しい色相は足さず、白い枠線・四隅マーカー・寸法ピルがその上でくっきり読めるようにする）。
+- ライブ表示は SwiftUI の `Path.fill`（寸法ラベルより下に重ねる）。撮影画像も同じ四角形を Core Graphics で塗ってから寸法ピルを描く。
+- 対角の数値ピルは中心に表示し続ける（塗りの上でも視認できる）。
+
 ---
 
 ## 5. 状態遷移（窓枠モード）
