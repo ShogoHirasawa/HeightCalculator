@@ -27,6 +27,13 @@ struct MeasurementOverlay {
     let text: String
 }
 
+/// 画面に投影した寸法ラベル（窓枠の幅/高さ/対角など）。§4.2 / §7.7。
+struct ProjectedLabel: Identifiable {
+    let id = UUID()
+    let point: CGPoint
+    let text: String
+}
+
 /// 仕様書 §6・§5・§8 を担う ObservableObject 兼 ARSessionDelegate（§9）。
 @MainActor
 final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
@@ -65,6 +72,20 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     /// 撮影フロー（§7.7）。「写真に保存しました」トーストの表示。
     @Published private(set) var savedToastVisible: Bool = false
 
+    // MARK: - 窓枠モード（§3〜§6）
+    /// 計測モード（高さ/窓枠）。
+    @Published private(set) var mode: MeasureMode = .height
+    /// 窓枠モードの進行状態（四隅の確定数）。
+    @Published private(set) var windowState: WindowState = .placing(0)
+    /// 窓枠の確定結果（4点確定時に算出）。
+    @Published private(set) var windowResult: WindowSize? = nil
+    /// 窓枠の寸法ラベル（§4.2）。確定後に幅/高さ/対角を画面投影して常時表示する。
+    @Published private(set) var windowLabels: [ProjectedLabel] = []
+    /// 窓枠の四隅を画面投影した点（時計回り）。確定後に内側を塗る（§4.4）。4点そろう時のみ非nil。
+    @Published private(set) var windowQuad: [CGPoint]? = nil
+    /// 撮影ガイド（窓枠）。四隅すべてが画角（余白付き）に入っているか。
+    @Published private(set) var windowInFrame: Bool = false
+
     // MARK: - AR 参照・内部状態
     private weak var arView: ARView?
     /// 確定待ちの底点アンカー（やり直しで削除する対象）。
@@ -75,6 +96,10 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     private var nextIndex: Int = 1
     private var errorToken: Int = 0
     private var savedToastToken: Int = 0
+    /// 窓枠の四隅ワールド座標（時計回り）。最大4点。
+    private var windowCorners: [SIMD3<Float>] = []
+    /// 窓枠のAR描画（四隅マーカー・辺の線）。クリアで削除する。
+    private var windowAnchors: [AnchorEntity] = []
     /// 床に沿って配置するレティクル本体（§7.4）。白いリング＋中心点を、十字が指す床位置に
     /// 置き、床面に寝かせて表示する（見る角度で楕円に傾く＝純正「計測」アプリ風）。
     private var reticleEntity: Entity?
@@ -88,6 +113,8 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     private let messageTooSteep = "角度が急すぎます。少し下げて対象に合わせてください"
     private let messageTooLow = "対象が低すぎます。底点より上を狙ってください"
     private let messageTracking = "動かさずに少し待ってください（トラッキング調整中）"
+    private let messageWallNotFound = "壁が検出できません。窓のある壁を映してください"
+    private let messageWindowDegenerate = "角の位置がうまく取れません。離れて取り直してください"
 
     // MARK: - セットアップ
     func attach(arView: ARView) {
@@ -161,9 +188,8 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
 
     // MARK: - ボタン操作
 
-    /// 計測ボタン押下（§5・§6）。
+    /// 計測ボタン押下（§5・§6・§4）。モードで分岐する。
     func measureTapped() {
-        guard state.isMeasureButtonEnabled else { return }
         guard let arView else { return }
 
         // トラッキング不良チェック（§8）
@@ -179,24 +205,32 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
             return
         }
 
-        switch state {
-        case .initializing:
-            return
-        case .waitingBase:
-            captureBase(arView)
-        case .waitingTarget:
-            captureTarget(frame: frame)
+        switch mode {
+        case .height:
+            guard state.isMeasureButtonEnabled else { return }
+            switch state {
+            case .initializing:
+                return
+            case .waitingBase:
+                captureBase(arView)
+            case .waitingTarget:
+                captureTarget(frame: frame)
+            }
+        case .window:
+            placeWindowCorner(arView)
         }
     }
 
-    /// クリアボタン押下（§7.1-5）。
+    /// クリアボタン押下（§7.1-5）。モードで分岐。
     func clearTapped() {
-        clearScene()
-        // 計測アンカー削除後に3Dレティクルが消えることがあるため、作り直して確実に復帰させる。
-        recreateReticle()
-        // 水平面は検出済みのため waitingBase に戻す。
-        if state != .initializing {
-            state = .waitingBase
+        switch mode {
+        case .height:
+            clearScene()
+            recreateReticle()   // 計測アンカー削除後に3Dレティクルが消えることがあるため作り直す。
+            if state != .initializing { state = .waitingBase }
+        case .window:
+            clearWindow()
+            recreateReticle()
         }
     }
 
@@ -216,16 +250,30 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         if reticleState != .off { reticleState = .off }
     }
 
-    /// やり直しボタン押下（§7.1-6）。.waitingTarget のときのみ有効。
+    /// やり直しボタン押下（§7.1-6）。
+    /// 高さ: .waitingTarget のとき直前の底点を破棄。窓枠: 直前に置いた角を1つ削除。
     func redoTapped() {
-        guard state == .waitingTarget else { return }
-        if let anchor = baseAnchor, let arView {
-            arView.scene.removeAnchor(anchor)
-            sceneAnchors.removeAll { $0 === anchor }
+        switch mode {
+        case .height:
+            guard state == .waitingTarget else { return }
+            if let anchor = baseAnchor, let arView {
+                arView.scene.removeAnchor(anchor)
+                sceneAnchors.removeAll { $0 === anchor }
+            }
+            baseAnchor = nil
+            baseWorldPosition = nil
+            state = .waitingBase
+        case .window:
+            removeLastWindowCorner()
         }
-        baseAnchor = nil
-        baseWorldPosition = nil
-        state = .waitingBase
+    }
+
+    /// やり直しが押せるか（§7.1-6）。
+    var isRedoEnabled: Bool {
+        switch mode {
+        case .height: return state.isRedoButtonEnabled
+        case .window: return !windowCorners.isEmpty
+        }
     }
 
     // MARK: - ステップ① 底点の捕捉（§5.1）
@@ -264,15 +312,26 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     // MARK: - 面に沿うレティクルの更新（§7.4）
-    /// 毎フレーム、底点選択中（.waitingBase）のみ面（床/壁）へレイキャストし、レティクルを
-    /// その面に沿って配置する。床（水平）に当たった時だけ reticleState を locked/approximate にし、
-    /// 壁（垂直）や未ヒットは off（計測ボタン無効）とする。
+    /// 毎フレーム、計測対象の面へレイキャストし、レティクルをその面に沿って配置する。
+    /// 高さモードでは床（水平）、窓枠モードでは壁（垂直）に当たった時だけ reticleState を
+    /// locked/approximate にする（計測ボタンの有効判定に使う）。それ以外は off。
     private func updateReticle() {
         guard !suppressReticle else {
             reticleEntity?.isEnabled = false
             return
         }
-        guard state == .waitingBase, let arView, let result = raycast(arView, alignment: .any) else {
+        // モード別の有効区間と、計測可能なアラインメント。
+        let active: Bool
+        let validAlignment: ARRaycastQuery.TargetAlignment
+        switch mode {
+        case .height:
+            active = (state == .waitingBase)
+            validAlignment = .horizontal
+        case .window:
+            active = windowState.canPlace
+            validAlignment = .vertical
+        }
+        guard active, let arView, let result = raycast(arView, alignment: .any) else {
             if reticleState != .off { reticleState = .off }
             if isReticleOnSurface { isReticleOnSurface = false }
             reticleEntity?.isEnabled = false
@@ -283,9 +342,9 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         reticleEntity?.isEnabled = true
         if !isReticleOnSurface { isReticleOnSurface = true }
 
-        // 床（水平面）のときのみ計測可能。壁（垂直）は off。
-        let isFloor = result.hit.targetAlignment == .horizontal
-        let newState: ReticleState = isFloor ? (result.exact ? .locked : .approximate) : .off
+        // 計測対象の面（高さ=水平 / 窓枠=垂直）のときのみ計測可能。
+        let isValid = result.hit.targetAlignment == validAlignment
+        let newState: ReticleState = isValid ? (result.exact ? .locked : .approximate) : .off
         if newState != reticleState { reticleState = newState }
     }
 
@@ -293,7 +352,7 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     /// 毎フレーム、対象捕捉中（.waitingTarget）のみ、現在のカメラ角度から暫定の高さを計算し、
     /// 底点の画面投影とともに公開する。OverlayView 側で点線・数値・延長線を描画する。
     private func updateGuide(frame: ARFrame) {
-        guard state == .waitingTarget, let base = baseWorldPosition, let arView else {
+        guard mode == .height, state == .waitingTarget, let base = baseWorldPosition, let arView else {
             if liveHeightMeters != nil { liveHeightMeters = nil }
             if projectedBase != nil { projectedBase = nil }
             if projectedTarget != nil { projectedTarget = nil }
@@ -361,9 +420,9 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     // MARK: - AR 描画
-    /// 純正「計測」アプリ風の白いポイント（床に寝かせた白リング＋中心の白い点）を置く。底点・終点で共用。
-    @discardableResult
-    private func placeMarker(at position: SIMD3<Float>) -> AnchorEntity? {
+    /// 純正「計測」アプリ風の白いポイント（白リング＋中心の白い点）を生成し、シーンに追加して返す
+    /// （配列への登録は呼び出し側で行う）。
+    private func makeMarker(at position: SIMD3<Float>) -> AnchorEntity? {
         guard let arView else { return nil }
         let anchor = AnchorEntity(world: position)
         let white = UnlitMaterial(color: .white)
@@ -372,8 +431,32 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         anchor.addChild(ring)
         anchor.addChild(dot)
         arView.scene.addAnchor(anchor)
-        sceneAnchors.append(anchor)
         return anchor
+    }
+
+    /// 高さ計測の底点・終点マーカー（sceneAnchors 管理）。
+    @discardableResult
+    private func placeMarker(at position: SIMD3<Float>) -> AnchorEntity? {
+        let anchor = makeMarker(at: position)
+        if let anchor { sceneAnchors.append(anchor) }
+        return anchor
+    }
+
+    /// 2点間に白い線（細い直方体）を引く。windowAnchors 管理（窓枠の辺に使用）。
+    private func drawWindowLine(from a: SIMD3<Float>, to b: SIMD3<Float>) {
+        guard let arView else { return }
+        let dir = b - a
+        let len = simd_length(dir)
+        guard len > 0.0001 else { return }
+        let anchor = AnchorEntity(world: (a + b) / 2)
+        let box = ModelEntity(
+            mesh: .generateBox(size: SIMD3<Float>(0.004, len, 0.004)),   // 既定でローカルY方向に長い
+            materials: [UnlitMaterial(color: .white)]
+        )
+        box.orientation = simd_quatf(from: SIMD3<Float>(0, 1, 0), to: simd_normalize(dir))   // Y軸を辺方向へ
+        anchor.addChild(box)
+        arView.scene.addAnchor(anchor)
+        windowAnchors.append(anchor)
     }
 
     private func drawVerticalLine(from base: SIMD3<Float>, height: Float) {
@@ -388,11 +471,139 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         sceneAnchors.append(anchor)
     }
 
+    // MARK: - 窓枠モード（§4〜§6）
+
+    /// 計測モードを切り替える（§3）。
+    /// トラッキングはリセットしない（高さ計測のワールド座標を保持するため）。窓枠は屋内で改めて
+    /// 検出される垂直面への相対計測なので、世界ドリフトの影響を実質受けない。
+    func setMode(_ newMode: MeasureMode) {
+        guard newMode != mode else { return }
+        mode = newMode
+        errorMessage = nil
+        if newMode == .window {
+            clearWindow()
+        }
+        recreateReticle()
+    }
+
+    /// 窓枠の角を1点確定する（§4.1）。壁（垂直面）へレイキャストして配置する。
+    private func placeWindowCorner(_ arView: ARView) {
+        guard windowState.canPlace else { return }
+        // 壁（垂直面）優先で取得。
+        guard let hit = raycast(arView, alignment: .vertical)?.hit else {
+            showError(messageWallNotFound)
+            return
+        }
+        let t = hit.worldTransform
+        let corner = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+
+        if let prev = windowCorners.last {
+            drawWindowLine(from: prev, to: corner)   // 直前の角と結ぶ辺
+        }
+        if let marker = makeMarker(at: corner) { windowAnchors.append(marker) }
+        windowCorners.append(corner)
+
+        if windowCorners.count == 4 {
+            // 最後の辺（④→①）を閉じる。
+            drawWindowLine(from: windowCorners[3], to: windowCorners[0])
+            finalizeWindow()
+        } else {
+            windowState = .placing(windowCorners.count)
+        }
+    }
+
+    /// 4点確定時に寸法を算出する（§4.2）。
+    private func finalizeWindow() {
+        guard windowCorners.count == 4 else { return }
+        let c = windowCorners.map { SIMD3<Double>($0) }
+        guard let size = WindowCalculator.size(topLeft: c[0], topRight: c[1],
+                                               bottomRight: c[2], bottomLeft: c[3]) else {
+            showError(messageWindowDegenerate)
+            removeLastWindowCorner()   // 退化: 直前を取り消して再取得させる
+            return
+        }
+        windowResult = size
+        windowState = .done
+    }
+
+    /// 直前に置いた角を1つ削除する（やり直し）。
+    private func removeLastWindowCorner() {
+        guard let arView, !windowCorners.isEmpty else { return }
+        // 直近に追加した「辺＋マーカー」を取り除く。確定（done）時は閉じ辺も1本余分にある。
+        let removeCount = (windowState == .done) ? 3 : (windowCorners.count >= 2 ? 2 : 1)
+        for _ in 0..<min(removeCount, windowAnchors.count) {
+            let anchor = windowAnchors.removeLast()
+            arView.scene.removeAnchor(anchor)
+        }
+        windowCorners.removeLast()
+        windowResult = nil
+        windowLabels = []
+        windowState = .placing(windowCorners.count)
+    }
+
+    /// 窓枠の全エンティティ・結果を消す（クリア／モード切替）。
+    private func clearWindow() {
+        if let arView {
+            for anchor in windowAnchors { arView.scene.removeAnchor(anchor) }
+        }
+        windowAnchors.removeAll()
+        windowCorners.removeAll()
+        windowResult = nil
+        windowLabels = []
+        windowState = .placing(0)
+        if isReticleOnSurface { isReticleOnSurface = false }
+        if reticleState != .off { reticleState = .off }
+    }
+
+    /// 確定後、窓枠の寸法ラベル（幅/高さ/対角）と内側塗り用の四隅投影を毎フレーム更新する（§4.2/§4.4）。
+    private func updateWindowLabels() {
+        guard mode == .window, capturedImage == nil,
+              windowState == .done, windowCorners.count == 4, let arView, let size = windowResult else {
+            if !windowLabels.isEmpty { windowLabels = [] }
+            if windowQuad != nil { windowQuad = nil }
+            return
+        }
+        let tl = windowCorners[0], tr = windowCorners[1], br = windowCorners[2], bl = windowCorners[3]
+        // 内側塗り用: 四隅すべてが投影できるときだけ quad を出す。
+        let projected = windowCorners.compactMap { arView.project($0) }
+        windowQuad = projected.count == 4 ? projected : nil
+        var labels: [ProjectedLabel] = []
+        // 幅: 上辺の中点
+        if let p = arView.project((tl + tr) / 2) {
+            labels.append(ProjectedLabel(point: p, text: "幅 " + HeightFormat.string(size.width)))
+        }
+        // 高さ: 左辺の中点
+        if let p = arView.project((tl + bl) / 2) {
+            labels.append(ProjectedLabel(point: p, text: "高さ " + HeightFormat.string(size.height)))
+        }
+        // 対角: 中心
+        if let p = arView.project((tl + tr + br + bl) / 4) {
+            labels.append(ProjectedLabel(point: p, text: "対角 " + HeightFormat.string(size.diagonal)))
+        }
+        windowLabels = labels
+    }
+
     // MARK: - 撮影フロー（§7.7） ステップ②撮影 → ③保存/共有
+
+    /// 撮影できる状態か（高さ: 計測済み / 窓枠: 4点確定）。
+    var canCapture: Bool {
+        switch mode {
+        case .height: return !measurements.isEmpty
+        case .window: return windowState == .done
+        }
+    }
+
+    /// 撮影モードのシャッターが押せるか（対象が画角に入っている）。
+    var captureReady: Bool {
+        switch mode {
+        case .height: return baseInFrame && targetInFrame
+        case .window: return windowInFrame
+        }
+    }
 
     /// ステップ② 撮影（フレーミング）モードに入る。照準リングは隠す。
     func enterCaptureMode() {
-        guard !measurements.isEmpty else { return }
+        guard canCapture else { return }
         captureMode = true
         suppressReticle = true
         reticleEntity?.isEnabled = false
@@ -404,22 +615,40 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         suppressReticle = false
         baseInFrame = false
         targetInFrame = false
+        windowInFrame = false
     }
 
-    /// シャッター: ARビューを撮影し、計測の高さ数値を線の中点に合成して、ステップ③へ。
+    /// シャッター: ARビューを撮影し、寸法ラベル（と窓枠の内側塗り）を合成してステップ③へ。
     func shutter() {
-        guard let arView, let m = measurements.first else { return }
+        guard let arView else { return }
         let viewSize = arView.bounds.size
-        let midWorld = m.base + SIMD3<Float>(0, Float(m.heightMeters) / 2, 0)
-        let label = arView.project(midWorld).map { (point: $0, text: HeightFormat.string(m.heightMeters)) }
+        let labels = currentCompositeLabels(arView)
+        // 窓枠モードでは内側の塗りも合成する。
+        let fill: [CGPoint]? = {
+            guard mode == .window, windowState == .done, windowCorners.count == 4 else { return nil }
+            let q = windowCorners.compactMap { arView.project($0) }
+            return q.count == 4 ? q : nil
+        }()
         arView.snapshot(saveToHDR: false) { [weak self] image in
             guard let self else { return }
             DispatchQueue.main.async {
                 self.captureMode = false
                 self.suppressReticle = false
                 guard let image else { return }
-                self.capturedImage = Self.composite(image, viewSize: viewSize, labels: label.map { [$0] } ?? [])
+                self.capturedImage = Self.composite(image, viewSize: viewSize, labels: labels, fill: fill)
             }
+        }
+    }
+
+    /// 撮影画像に合成する寸法ラベル（モード別）。
+    private func currentCompositeLabels(_ arView: ARView) -> [(point: CGPoint, text: String)] {
+        switch mode {
+        case .height:
+            guard let m = measurements.first else { return [] }
+            let mid = m.base + SIMD3<Float>(0, Float(m.heightMeters) / 2, 0)
+            return arView.project(mid).map { [($0, HeightFormat.string(m.heightMeters))] } ?? []
+        case .window:
+            return windowLabels.map { (point: $0.point, text: $0.text) }
         }
     }
 
@@ -457,30 +686,57 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
-    /// 撮影モード中、最新計測の底点・終点が画角（余白付き）に入っているかを毎フレーム判定する。
+    /// 撮影モード中、対象が画角（余白付き）に入っているかを毎フレーム判定する（モード別）。
     private func updateFraming() {
-        guard captureMode, let arView, let m = measurements.first else {
+        guard captureMode, let arView else {
             if baseInFrame { baseInFrame = false }
             if targetInFrame { targetInFrame = false }
+            if windowInFrame { windowInFrame = false }
             return
         }
         let frame = arView.bounds.insetBy(dx: 24, dy: 24)   // 余白を持たせて背景も入るように
-        let b = arView.project(m.base).map { frame.contains($0) } ?? false
-        let t = arView.project(m.base + SIMD3<Float>(0, Float(m.heightMeters), 0)).map { frame.contains($0) } ?? false
-        if b != baseInFrame { baseInFrame = b }
-        if t != targetInFrame { targetInFrame = t }
+        switch mode {
+        case .height:
+            guard let m = measurements.first else {
+                if baseInFrame { baseInFrame = false }
+                if targetInFrame { targetInFrame = false }
+                return
+            }
+            let b = arView.project(m.base).map { frame.contains($0) } ?? false
+            let t = arView.project(m.base + SIMD3<Float>(0, Float(m.heightMeters), 0)).map { frame.contains($0) } ?? false
+            if b != baseInFrame { baseInFrame = b }
+            if t != targetInFrame { targetInFrame = t }
+        case .window:
+            // 四隅すべてが画角内かどうか。
+            let allIn = windowCorners.count == 4 && windowCorners.allSatisfy { c in
+                arView.project(c).map { frame.contains($0) } ?? false
+            }
+            if allIn != windowInFrame { windowInFrame = allIn }
+        }
     }
 
-    /// スナップショットに数値ピル（白いカプセル＋黒文字、純正Measure風）を線の中点へ合成する。
+    /// スナップショットに、窓枠の内側塗り（任意）と数値ピル（白いカプセル＋黒文字）を合成する。
     /// 投影座標はビュー（ポイント）系のため、スナップショット画像サイズとの比 `scale` で位置・寸法を補正する
     /// （これを行わないと数値が画像の隅に小さく描かれる）。
     private static func composite(_ base: UIImage, viewSize: CGSize,
-                                  labels: [(point: CGPoint, text: String)]) -> UIImage {
+                                  labels: [(point: CGPoint, text: String)],
+                                  fill: [CGPoint]? = nil) -> UIImage {
         let scale = viewSize.width > 0 ? base.size.width / viewSize.width : 1
         let renderer = UIGraphicsImageRenderer(size: base.size)
         return renderer.image { ctx in
             base.draw(at: .zero)
             let cg = ctx.cgContext
+
+            // 窓枠の内側を控えめにグレーアウト（§4.4）。ラベルより先（下）に描く。
+            if let fill, fill.count == 4 {
+                let path = UIBezierPath()
+                path.move(to: CGPoint(x: fill[0].x * scale, y: fill[0].y * scale))
+                for p in fill.dropFirst() { path.addLine(to: CGPoint(x: p.x * scale, y: p.y * scale)) }
+                path.close()
+                UIColor.black.withAlphaComponent(0.22).setFill()
+                path.fill()
+            }
+
             let font = UIFont.systemFont(ofSize: 16 * scale, weight: .semibold)
             let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.black]
             for label in labels {
@@ -502,9 +758,9 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
-    /// 確定した計測の数値ピル位置（線の中点）を毎フレーム投影して公開する（§7.6 常時表示）。
+    /// 確定した計測の数値ピル位置（線の中点）を毎フレーム投影して公開する（§7.6 常時表示）。高さモードのみ。
     private func updateMeasurementOverlay() {
-        guard let arView, capturedImage == nil, let m = measurements.first else {
+        guard mode == .height, let arView, capturedImage == nil, let m = measurements.first else {
             if measurementOverlay != nil { measurementOverlay = nil }
             return
         }
@@ -540,6 +796,7 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         updateGuide(frame: frame)
         updateFraming()
         updateMeasurementOverlay()
+        updateWindowLabels()
     }
 }
 

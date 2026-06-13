@@ -18,6 +18,12 @@
 		CC0000000000000000000009 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000009 /* Assets.xcassets */; };
 		CC000000000000000000000B /* HeightCalculatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000000B /* HeightCalculatorTests.swift */; };
 		CC000000000000000000000C /* HeightCalculator.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000005 /* HeightCalculator.swift */; };
+		CC0000000000000000000010 /* WindowSize.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000010 /* WindowSize.swift */; };
+		CC0000000000000000000011 /* WindowCalculator.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000011 /* WindowCalculator.swift */; };
+		CC0000000000000000000012 /* MeasureMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000012 /* MeasureMode.swift */; };
+		CC0000000000000000000013 /* WindowSize.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000010 /* WindowSize.swift */; };
+		CC0000000000000000000014 /* WindowCalculator.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000011 /* WindowCalculator.swift */; };
+		CC0000000000000000000015 /* WindowCalculatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000013 /* WindowCalculatorTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -34,6 +40,10 @@
 		BB0000000000000000000009 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		BB000000000000000000000A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		BB000000000000000000000B /* HeightCalculatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeightCalculatorTests.swift; sourceTree = "<group>"; };
+		BB0000000000000000000010 /* WindowSize.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowSize.swift; sourceTree = "<group>"; };
+		BB0000000000000000000011 /* WindowCalculator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowCalculator.swift; sourceTree = "<group>"; };
+		BB0000000000000000000012 /* MeasureMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeasureMode.swift; sourceTree = "<group>"; };
+		BB0000000000000000000013 /* WindowCalculatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowCalculatorTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -83,6 +93,9 @@
 				BB0000000000000000000006 /* Measurement.swift */,
 				BB0000000000000000000007 /* OverlayView.swift */,
 				BB0000000000000000000008 /* MeasureState.swift */,
+				BB0000000000000000000012 /* MeasureMode.swift */,
+				BB0000000000000000000010 /* WindowSize.swift */,
+				BB0000000000000000000011 /* WindowCalculator.swift */,
 				BB0000000000000000000009 /* Assets.xcassets */,
 				BB000000000000000000000A /* Info.plist */,
 			);
@@ -93,6 +106,7 @@
 			isa = PBXGroup;
 			children = (
 				BB000000000000000000000B /* HeightCalculatorTests.swift */,
+				BB0000000000000000000013 /* WindowCalculatorTests.swift */,
 			);
 			path = HeightMeasureTests;
 			sourceTree = "<group>";
@@ -194,6 +208,9 @@
 				CC0000000000000000000006 /* Measurement.swift in Sources */,
 				CC0000000000000000000007 /* OverlayView.swift in Sources */,
 				CC0000000000000000000008 /* MeasureState.swift in Sources */,
+				CC0000000000000000000012 /* MeasureMode.swift in Sources */,
+				CC0000000000000000000010 /* WindowSize.swift in Sources */,
+				CC0000000000000000000011 /* WindowCalculator.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -203,6 +220,9 @@
 			files = (
 				CC000000000000000000000B /* HeightCalculatorTests.swift in Sources */,
 				CC000000000000000000000C /* HeightCalculator.swift in Sources */,
+				CC0000000000000000000015 /* WindowCalculatorTests.swift in Sources */,
+				CC0000000000000000000014 /* WindowCalculator.swift in Sources */,
+				CC0000000000000000000013 /* WindowSize.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

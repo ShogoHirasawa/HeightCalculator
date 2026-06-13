@@ -21,11 +21,12 @@ let package = Package(
                 "MeasureViewModel.swift",
                 "OverlayView.swift",
                 "MeasureState.swift",
+                "MeasureMode.swift",
                 "Measurement.swift",
                 "Assets.xcassets",
                 "Info.plist",
             ],
-            sources: ["HeightCalculator.swift"]
+            sources: ["HeightCalculator.swift", "WindowCalculator.swift", "WindowSize.swift"]
         ),
         .testTarget(
             name: "HeightMeasureCoreTests",
