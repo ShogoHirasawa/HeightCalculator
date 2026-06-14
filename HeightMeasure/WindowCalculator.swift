@@ -1,35 +1,72 @@
 import simd
 
 /// 窓枠サイズ計測の純関数（§4.3）。RealityKit / ARKit に依存しない。
-/// 四隅のワールド座標（時計回り: 左上→右上→右下→左下）から、幅・高さ・対角線を返す。
+/// 四隅のワールド座標（時計回り: 左上→右上→右下→左下）を、基準平面に投影し
+/// 重力基準（水平=幅 / 鉛直=高さ）の軸合わせ長方形として寸法を返す。
+///
+/// 平面に拘束することで、各隅の奥行き（壁の法線方向）の誤差を吸収し、Z方向にねじれた
+/// 四角形による寸法の歪みを取り除く。さらに水平/鉛直軸へ分解し各頂角90度の長方形として
+/// 幅・高さを平均化するため、隅の取り位置のばらつきにも強い。
 enum WindowCalculator {
 
     /// 退化（点の重複や極小辺）とみなすしきい値（m）。
     static let minEdge: Double = 0.02
 
     /// - Parameters:
-    ///   - topLeft / topRight / bottomRight / bottomLeft: 四隅のワールド座標（時計回り）
+    ///   - TL/TR/BR/BL: 四隅のワールド座標（時計回り: 左上→右上→右下→左下）
+    ///   - planeNormal: 基準平面の法線（壁の向き）。nil の場合は四隅の対角から平面を推定する。
+    ///   - up: 重力上方向（worldAlignment=.gravity なら (0,1,0)）。平面内の鉛直＝高さ方向に使う。
     /// - Returns: 幅・高さ・対角線。退化している場合は nil。
     static func size(topLeft TL: SIMD3<Double>,
                      topRight TR: SIMD3<Double>,
                      bottomRight BR: SIMD3<Double>,
-                     bottomLeft BL: SIMD3<Double>) -> WindowSize? {
-        func d(_ a: SIMD3<Double>, _ b: SIMD3<Double>) -> Double { simd_length(a - b) }
+                     bottomLeft BL: SIMD3<Double>,
+                     planeNormal: SIMD3<Double>? = nil,
+                     up: SIMD3<Double> = SIMD3<Double>(0, 1, 0)) -> WindowSize? {
+        let center = (TL + TR + BR + BL) / 4
 
-        let top = d(TL, TR)
-        let bottom = d(BL, BR)
-        let left = d(TL, BL)
-        let right = d(TR, BR)
-        let diag1 = d(TL, BR)
-        let diag2 = d(TR, BL)
+        // 基準平面の法線。指定が無ければ四隅の対角ベクトルの外積から推定する。
+        let n: SIMD3<Double>
+        if let pn = planeNormal, simd_length(pn) > 1e-9 {
+            n = simd_normalize(pn)
+        } else {
+            let cross = simd_cross(BR - TL, BL - TR)
+            guard simd_length(cross) > 1e-9 else { return nil }
+            n = simd_normalize(cross)
+        }
 
-        let width = (top + bottom) / 2
-        let height = (left + right) / 2
-        let diagonal = (diag1 + diag2) / 2
+        // 平面内の2D基底を作る。v=鉛直（up を平面へ投影）、u=水平（n×v）。
+        let uAxis: SIMD3<Double>
+        let vAxis: SIMD3<Double>
+        let vRaw = up - simd_dot(up, n) * n
+        if simd_length(vRaw) > 1e-6 {
+            vAxis = simd_normalize(vRaw)
+            uAxis = simd_normalize(simd_cross(n, vAxis))
+        } else {
+            // 壁がほぼ水平（窓が天井/床面）で重力から軸を決められない場合は上辺方向で代替。
+            let edge = TR - TL
+            let uRaw = edge - simd_dot(edge, n) * n
+            guard simd_length(uRaw) > 1e-9 else { return nil }
+            uAxis = simd_normalize(uRaw)
+            vAxis = simd_normalize(simd_cross(n, uAxis))
+        }
+
+        // 各点を平面内2D座標 (u, v) へ。法線成分は捨てられる＝平面投影。
+        func uv(_ p: SIMD3<Double>) -> SIMD2<Double> {
+            let d = p - center
+            return SIMD2<Double>(simd_dot(d, uAxis), simd_dot(d, vAxis))
+        }
+        let a = uv(TL), b = uv(TR), c = uv(BR), e = uv(BL)
+
+        // 幅: 上辺・下辺の水平スパンの平均 / 高さ: 左辺・右辺の鉛直スパンの平均（各頂角90度）。
+        let width = (abs(b.x - a.x) + abs(c.x - e.x)) / 2
+        let height = (abs(a.y - e.y) + abs(b.y - c.y)) / 2
 
         // 退化チェック（極小・重複）。
         guard width >= minEdge, height >= minEdge else { return nil }
 
+        // 直角長方形なので対角は幅・高さから求める。
+        let diagonal = (width * width + height * height).squareRoot()
         return WindowSize(width: width, height: height, diagonal: diagonal)
     }
 }

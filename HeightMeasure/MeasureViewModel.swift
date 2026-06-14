@@ -98,6 +98,9 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     private var savedToastToken: Int = 0
     /// 窓枠の四隅ワールド座標（時計回り）。最大4点。
     private var windowCorners: [SIMD3<Float>] = []
+    /// 窓枠の基準平面（1点目で確定）。点＝最初の角、法線＝壁面の向き。
+    /// 2点目以降はこの平面にレイを交差させて取得し、奥行きのばらつきを排除する。
+    private var windowPlane: (point: SIMD3<Float>, normal: SIMD3<Float>)?
     /// 窓枠のAR描画（四隅マーカー・辺の線）。クリアで削除する。
     private var windowAnchors: [AnchorEntity] = []
     /// 床に沿って配置するレティクル本体（§7.4）。白いリング＋中心点を、十字が指す床位置に
@@ -276,6 +279,9 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
+    /// 窓枠の基準平面が確定済みか（1点目を置いた後）。2点目以降は壁ロック不要で計測ボタンを有効化する。
+    var isWindowPlaneSet: Bool { windowPlane != nil }
+
     // MARK: - ステップ① 底点の捕捉（§5.1）
 
     /// 画面中央から指定アラインメントの面へレイキャストする（§5.1）。精度優先の順で試し、
@@ -320,6 +326,24 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
             reticleEntity?.isEnabled = false
             return
         }
+
+        // 窓枠の2点目以降: 基準平面が確定していれば、平面との交点にレティクルを置き常に計測可能にする
+        // （壁ロック不要・凹凸/反射の影響を受けない）。
+        if mode == .window, windowState.canPlace, let plane = windowPlane, let arView {
+            if let p = intersectRayWithBasePlane(arView, plane: plane) {
+                let q = simd_quatf(from: SIMD3<Float>(0, 1, 0), to: plane.normal)   // 壁面へ立てる
+                reticleEntity?.transform = Transform(scale: SIMD3<Float>(repeating: 1), rotation: q, translation: p)
+                reticleEntity?.isEnabled = true
+                if !isReticleOnSurface { isReticleOnSurface = true }
+                if reticleState != .locked { reticleState = .locked }
+            } else {
+                reticleEntity?.isEnabled = false
+                if isReticleOnSurface { isReticleOnSurface = false }
+                if reticleState != .off { reticleState = .off }
+            }
+            return
+        }
+
         // モード別の有効区間と、計測可能なアラインメント。
         let active: Bool
         let validAlignment: ARRaycastQuery.TargetAlignment
@@ -486,16 +510,33 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         recreateReticle()
     }
 
-    /// 窓枠の角を1点確定する（§4.1）。壁（垂直面）へレイキャストして配置する。
+    /// 窓枠の角を1点確定する（§4.1）。
+    /// 1点目: 壁（垂直面）へレイキャストし、その点と法線で「基準平面」を確定する。
+    /// 2点目以降: 画面中央のレイと基準平面の交点で取得する（壁ロック不要・凹凸や反射の影響を受けない）。
     private func placeWindowCorner(_ arView: ARView) {
         guard windowState.canPlace else { return }
-        // 壁（垂直面）優先で取得。
-        guard let hit = raycast(arView, alignment: .vertical)?.hit else {
-            showError(messageWallNotFound)
-            return
+
+        let corner: SIMD3<Float>
+        if windowCorners.isEmpty {
+            // 1点目: 壁の垂直面に当てて基準平面（点＋法線）を固定する。
+            guard let hit = raycast(arView, alignment: .vertical)?.hit else {
+                showError(messageWallNotFound)
+                return
+            }
+            let t = hit.worldTransform
+            corner = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+            // raycast 結果の worldTransform の Y 軸が面の法線方向。
+            let normal = simd_normalize(SIMD3<Float>(t.columns.1.x, t.columns.1.y, t.columns.1.z))
+            windowPlane = (point: corner, normal: normal)
+        } else {
+            // 2点目以降: 画面中央のレイ × 基準平面の交点。
+            guard let plane = windowPlane,
+                  let p = intersectRayWithBasePlane(arView, plane: plane) else {
+                showError(messageWallNotFound)
+                return
+            }
+            corner = p
         }
-        let t = hit.worldTransform
-        let corner = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
 
         if let prev = windowCorners.last {
             drawWindowLine(from: prev, to: corner)   // 直前の角と結ぶ辺
@@ -512,12 +553,25 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
-    /// 4点確定時に寸法を算出する（§4.2）。
+    /// 画面中央のレイと基準平面の交点を求める（壁ロック不要の角取得・レティクル表示に使う）。
+    private func intersectRayWithBasePlane(_ arView: ARView,
+                                           plane: (point: SIMD3<Float>, normal: SIMD3<Float>)) -> SIMD3<Float>? {
+        guard let ray = arView.ray(through: arView.center) else { return nil }
+        let denom = simd_dot(ray.direction, plane.normal)
+        guard abs(denom) > 1e-6 else { return nil }
+        let t = simd_dot(plane.point - ray.origin, plane.normal) / denom
+        guard t > 0 else { return nil }
+        return ray.origin + t * ray.direction
+    }
+
+    /// 4点確定時に寸法を算出する（§4.2）。基準平面の法線を渡し、平面拘束＋直角長方形で算出する。
     private func finalizeWindow() {
         guard windowCorners.count == 4 else { return }
         let c = windowCorners.map { SIMD3<Double>($0) }
+        let normal = windowPlane.map { SIMD3<Double>($0.normal) }
         guard let size = WindowCalculator.size(topLeft: c[0], topRight: c[1],
-                                               bottomRight: c[2], bottomLeft: c[3]) else {
+                                               bottomRight: c[2], bottomLeft: c[3],
+                                               planeNormal: normal) else {
             showError(messageWindowDegenerate)
             removeLastWindowCorner()   // 退化: 直前を取り消して再取得させる
             return
@@ -536,6 +590,7 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
             arView.scene.removeAnchor(anchor)
         }
         windowCorners.removeLast()
+        if windowCorners.isEmpty { windowPlane = nil }   // 1点目を取り消したら基準平面も破棄
         windowResult = nil
         windowLabels = []
         windowState = .placing(windowCorners.count)
@@ -548,6 +603,7 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         }
         windowAnchors.removeAll()
         windowCorners.removeAll()
+        windowPlane = nil
         windowResult = nil
         windowLabels = []
         windowState = .placing(0)

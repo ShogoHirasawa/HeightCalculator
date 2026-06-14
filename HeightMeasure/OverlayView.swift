@@ -398,8 +398,9 @@ struct OverlayView: View {
                 return true
             }
         case .window:
-            // 角を置ける段階で、壁を捉えている時だけ有効。
-            return viewModel.windowState.canPlace && viewModel.reticleState != .off
+            // 1点目は壁ロック必須。2点目以降は基準平面が確定済みなので壁ロック不要で有効。
+            return viewModel.windowState.canPlace
+                && (viewModel.isWindowPlaneSet || viewModel.reticleState != .off)
         }
     }
 
