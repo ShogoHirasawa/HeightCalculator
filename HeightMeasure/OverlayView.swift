@@ -267,11 +267,8 @@ struct OverlayView: View {
         case .window:
             switch viewModel.windowState {
             case .placing(let n):
-                if n == 0 && viewModel.reticleState == .off {
-                    return "カーテンを避けて、カメラを窓枠に近づけカーソルをあわせてください（ガラス部には反応しない場合があります）"
-                }
                 let corner = WindowState.cornerLabels[n]
-                return "窓枠の\(corner)の角に合わせてボタンを押してください"
+                return "カーテンを避けて、カメラを窓枠の\(corner)角に近づけカーソルをあわせてください（ガラス部には反応しない場合があります）"
             case .done:
                 if let s = viewModel.windowResult {
                     return "幅 \(HeightFormat.string(s.width)) × 高さ \(HeightFormat.string(s.height))（対角 \(HeightFormat.string(s.diagonal))）"
