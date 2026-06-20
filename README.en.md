@@ -21,6 +21,7 @@ Valid conditions: `f_h >= 0.05` (not aimed too close to straight up) and `fy > 0
 
 ## Features
 
+- **Start-of-measurement guide popup**: when entering height or window mode, an illustrated popup explains where to stand (step back so the ground and target are both in frame / face the window head-on). Dismiss by tapping the background or "はじめる" (Start).
 - **Single measurement**: one measurement at a time; re-measuring replaces the previous one. The confirmed height is always shown as a pill (white capsule, black text) at the midpoint of the line.
 - **Surface-conforming reticle**: an Apple Measure-style reticle (a white ring in AR space) tilts to lie on the surface it hits — flat on floors, upright on walls. The base point (①) only enables the measure button on a horizontal floor, preventing accidental selection of a wall.
 - **Live guide**: after the base is set, while aiming at the target, a dotted line from the ground to the reticle, a live height value (cm/m), and an extension line are shown in real time.
