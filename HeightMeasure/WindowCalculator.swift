@@ -12,6 +12,28 @@ enum WindowCalculator {
     /// 退化（点の重複や極小辺）とみなすしきい値（m）。
     static let minEdge: Double = 0.02
 
+    /// 基準平面内の重力ベース軸（u=水平 / v=鉛直）を返す。
+    /// v は重力上方向を平面へ投影したもの、u は n×v（平面内の水平）。
+    /// 壁がほぼ水平で鉛直が決められない場合は nil。
+    static func planeAxes(normal: SIMD3<Double>,
+                          up: SIMD3<Double> = SIMD3<Double>(0, 1, 0)) -> (u: SIMD3<Double>, v: SIMD3<Double>)? {
+        guard simd_length(normal) > 1e-9 else { return nil }
+        let n = simd_normalize(normal)
+        let vRaw = up - simd_dot(up, n) * n
+        guard simd_length(vRaw) > 1e-6 else { return nil }
+        let v = simd_normalize(vRaw)
+        let u = simd_normalize(simd_cross(n, v))
+        return (u, v)
+    }
+
+    /// origin を通り axis 方向の直線上へ point を射影する（axis 以外の方向の成分は origin に合わせる）。
+    /// axis は単位ベクトル前提。窓枠の「同じ高さの水平線上」「真下の鉛直線上」への拘束に使う。
+    static func projectOntoLine(_ point: SIMD3<Double>,
+                                origin: SIMD3<Double>,
+                                axis: SIMD3<Double>) -> SIMD3<Double> {
+        origin + simd_dot(point - origin, axis) * axis
+    }
+
     /// - Parameters:
     ///   - TL/TR/BR/BL: 四隅のワールド座標（時計回り: 左上→右上→右下→左下）
     ///   - planeNormal: 基準平面の法線（壁の向き）。nil の場合は四隅の対角から平面を推定する。
