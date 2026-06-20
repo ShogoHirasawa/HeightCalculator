@@ -26,6 +26,8 @@ struct OverlayView: View {
     // 配色
     private let accent = Color(UIColor(hex: 0x1D9E75))       // アクセント緑
     private let errorRed = Color(UIColor(hex: 0xA32D2D))     // エラー（§8）
+    private let guideAccent = Color(UIColor(hex: 0x4285F4))  // 案内イラストに合わせたブルー
+    private let guideInk = Color(UIColor(hex: 0x2A2E33))     // 案内ポップアップの本文色（濃いグレー）
 
     var body: some View {
         ZStack {
@@ -67,6 +69,16 @@ struct OverlayView: View {
             if let image = viewModel.capturedImage {
                 capturePreview(image)
             }
+
+            // 窓枠モード開始時の案内ポップアップ（窓の正面に立って計測するよう促す）。
+            if viewModel.showWindowGuide {
+                windowGuidePopup
+            }
+
+            // 高さモード開始時の案内ポップアップ（地面から2階ベランダ等までの測り方を促す）。
+            if viewModel.showHeightGuide {
+                heightGuidePopup
+            }
         }
         // 床にロックした瞬間に軽いハプティクス（§7.4）。状態変化を安定して拾うため最上位に付ける。
         .onChange(of: viewModel.reticleState) { _, newValue in
@@ -76,6 +88,89 @@ struct OverlayView: View {
         .sheet(item: $viewModel.shareItem) { item in
             ShareSheet(image: item.image)
         }
+    }
+
+    // MARK: - モード開始時の案内ポップアップ（§7）
+    /// 窓枠計測は窓の正面（壁に正対）に立つほど四隅の奥行きが安定するため、開始時に立ち位置を案内する。
+    private var windowGuidePopup: some View {
+        guidePopup(
+            imageName: "window_guide",
+            symbol: "figure.stand",
+            title: "窓の正面に立って計測してください",
+            message: "窓のある壁に対してまっすぐ正面に立ち、斜めからではなく正対した状態で窓枠の四隅を計測すると、より正確に測れます。",
+            dismiss: { viewModel.showWindowGuide = false }
+        )
+    }
+
+    /// 高さ計測は地面と対象（2階のベランダ等）の両方が画角に入る距離まで離れて測るため、立ち位置を案内する。
+    private var heightGuidePopup: some View {
+        guidePopup(
+            imageName: "height_guide",
+            symbol: "arrow.up.and.line.horizontal.and.arrow.down",
+            title: "地面と対象を画角に入れて計測してください",
+            message: "建物から少し離れ、地面と計測したい対象（2階のベランダなど）の両方が画面に収まる位置に立つと、地面から対象までの高さを正確に測れます。",
+            dismiss: { viewModel.showHeightGuide = false }
+        )
+    }
+
+    /// 案内ポップアップの共通レイアウト。案内イラストのトンマナ（白カード・濃色文字・ブルー）に合わせる。
+    /// 画像（無ければ SF Symbol）＋見出し＋説明＋「はじめる」。
+    private func guidePopup(imageName: String, symbol: String, title: String, message: String, dismiss: @escaping () -> Void) -> some View {
+        ZStack {
+            Color.black.opacity(0.4)
+                .ignoresSafeArea()
+                .onTapGesture { dismiss() }
+
+            VStack(spacing: 18) {
+                // 用意した案内イラストがあればそれを、無ければ SF Symbol をフォールバック表示。
+                // イラストは白背景なので、枠も白に揃えてカードとシームレスに馴染ませる。
+                Group {
+                    if UIImage(named: imageName) != nil {
+                        Image(imageName)
+                            .resizable()
+                            .scaledToFit()
+                    } else {
+                        Image(systemName: symbol)
+                            .font(.system(size: 52, weight: .regular))
+                            .foregroundStyle(guideAccent)
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .frame(height: 180)
+                .frame(maxWidth: .infinity)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                Text(title)
+                    .font(.headline.weight(.bold))
+                    .foregroundStyle(guideInk)
+                    .multilineTextAlignment(.center)
+
+                Text(message)
+                    .font(.subheadline)
+                    .foregroundStyle(guideInk.opacity(0.65))
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button(action: dismiss) {
+                    Text("はじめる")
+                        .font(.headline.weight(.bold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, minHeight: 50)
+                        .background(Capsule().fill(guideAccent))
+                }
+                .padding(.top, 2)
+            }
+            .padding(20)
+            .background(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(Color.white)
+            )
+            .shadow(color: .black.opacity(0.18), radius: 20, y: 8)
+            .padding(.horizontal, 36)
+        }
+        .transition(.opacity)
     }
 
     // 画面中央レイヤー（レティクル＋ライブガイド）。レイキャスト原点と一致させるため全画面中央。

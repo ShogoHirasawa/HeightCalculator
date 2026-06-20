@@ -70,4 +70,57 @@ final class WindowCalculatorTests: XCTestCase {
         XCTAssertEqual(size!.width, 1.0, accuracy: tolerance)
         XCTAssertEqual(size!.height, 0.8, accuracy: tolerance)
     }
+
+    // MARK: - 軸拘束（方式A: 重力基準）
+
+    // 垂直壁（法線 +z）の重力ベース軸: v=鉛直(0,1,0)、u=平面内水平で v・法線に直交。
+    func test_planeAxes_verticalWall() {
+        let axes = WindowCalculator.planeAxes(normal: SIMD3<Double>(0, 0, 1))
+        XCTAssertNotNil(axes)
+        let (u, v) = axes!
+        XCTAssertEqual(simd_length(u), 1.0, accuracy: 1e-6)
+        XCTAssertEqual(simd_length(v), 1.0, accuracy: 1e-6)
+        XCTAssertEqual(v.y, 1.0, accuracy: 1e-6)              // 鉛直は重力方向
+        XCTAssertEqual(simd_dot(u, v), 0.0, accuracy: 1e-6)   // 直交
+        XCTAssertEqual(u.z, 0.0, accuracy: 1e-6)              // 平面内（法線方向の成分なし）
+    }
+
+    // 壁がほぼ水平（法線が上向き）だと鉛直が決められず nil。
+    func test_planeAxes_horizontalWall_returnsNil() {
+        XCTAssertNil(WindowCalculator.planeAxes(normal: SIMD3<Double>(0, 1, 0)))
+    }
+
+    // 直線への射影: axis 方向は point を採用し、それ以外の成分は origin に一致する。
+    func test_projectOntoLine() {
+        let p = WindowCalculator.projectOntoLine(
+            SIMD3<Double>(2, 3, 5),
+            origin: SIMD3<Double>(1, 1, 1),
+            axis: SIMD3<Double>(1, 0, 0))
+        XCTAssertEqual(p.x, 2.0, accuracy: 1e-6)
+        XCTAssertEqual(p.y, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(p.z, 1.0, accuracy: 1e-6)
+    }
+
+    // 方式A の拘束パイプライン: 右上/右下の生交点に狙いズレ（高さ・奥行き）があっても、
+    // 左上を基準に水平/鉛直へ拘束すると窓枠に沿う長方形になる。幅1.0 / 高さ1.6。
+    func test_constraint_snapsToRectangle_despiteAimError() {
+        let normal = SIMD3<Double>(0, 0, 1)
+        let axes = WindowCalculator.planeAxes(normal: normal)!
+        let tl = SIMD3<Double>(0, 2, 0)
+        let rawTR = SIMD3<Double>(1.0, 2.07, -0.1)   // 7cm 高い・10cm 手前にズレた狙い
+        let rawBR = SIMD3<Double>(1.08, 0.4, 0.12)   // 8cm 右・12cm 奥にズレた狙い
+
+        let tr = WindowCalculator.projectOntoLine(rawTR, origin: tl, axis: axes.u)  // 左上と同じ高さ
+        let br = WindowCalculator.projectOntoLine(rawBR, origin: tr, axis: axes.v)  // 右上の真下
+        let bl = WindowCalculator.projectOntoLine(br, origin: tl, axis: axes.v)     // 左上の真下・右下と同じ下端
+
+        let size = WindowCalculator.size(topLeft: tl, topRight: tr, bottomRight: br, bottomLeft: bl, planeNormal: normal)
+        XCTAssertNotNil(size)
+        XCTAssertEqual(size!.width, 1.0, accuracy: tolerance)
+        XCTAssertEqual(size!.height, 1.6, accuracy: tolerance)
+        XCTAssertEqual(tl.y, tr.y, accuracy: 1e-6)   // 上辺は水平
+        XCTAssertEqual(bl.y, br.y, accuracy: 1e-6)   // 下辺は水平
+        XCTAssertEqual(tl.x, bl.x, accuracy: 1e-6)   // 左辺は鉛直
+        XCTAssertEqual(tr.x, br.x, accuracy: 1e-6)   // 右辺は鉛直
+    }
 }

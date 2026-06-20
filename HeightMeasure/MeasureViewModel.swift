@@ -85,6 +85,11 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published private(set) var windowQuad: [CGPoint]? = nil
     /// 撮影ガイド（窓枠）。四隅すべてが画角（余白付き）に入っているか。
     @Published private(set) var windowInFrame: Bool = false
+    /// 窓枠モードに入った直後に表示する案内ポップアップ（窓の正面に立つよう促す）。
+    @Published var showWindowGuide: Bool = false
+    /// 高さモードの開始時に表示する案内ポップアップ（地面から対象までの測り方を促す）。
+    /// 高さは初期モードのため、起動直後にも表示する。
+    @Published var showHeightGuide: Bool = true
 
     // MARK: - AR 参照・内部状態
     private weak var arView: ARView?
@@ -330,7 +335,9 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         // 窓枠の2点目以降: 基準平面が確定していれば、平面との交点にレティクルを置き常に計測可能にする
         // （壁ロック不要・凹凸/反射の影響を受けない）。
         if mode == .window, windowState.canPlace, let plane = windowPlane, let arView {
-            if let p = intersectRayWithBasePlane(arView, plane: plane) {
+            if let raw = intersectRayWithBasePlane(arView, plane: plane) {
+                // 実配置と同じ拘束をプレビューにも適用し、見たまま打てるようにする。
+                let p = snapWindowCorner(raw, index: windowCorners.count)
                 let q = simd_quatf(from: SIMD3<Float>(0, 1, 0), to: plane.normal)   // 壁面へ立てる
                 reticleEntity?.transform = Transform(scale: SIMD3<Float>(repeating: 1), rotation: q, translation: p)
                 reticleEntity?.isEnabled = true
@@ -506,6 +513,9 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         errorMessage = nil
         if newMode == .window {
             clearWindow()
+            showWindowGuide = true
+        } else {
+            showHeightGuide = true
         }
         recreateReticle()
     }
@@ -518,7 +528,7 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
 
         let corner: SIMD3<Float>
         if windowCorners.isEmpty {
-            // 1点目: 壁の垂直面に当てて基準平面（点＋法線）を固定する。
+            // 1点目（左上）: 壁の垂直面に当てて基準平面（点＋法線）を固定する。
             guard let hit = raycast(arView, alignment: .vertical)?.hit else {
                 showError(messageWallNotFound)
                 return
@@ -529,20 +539,21 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
             let normal = simd_normalize(SIMD3<Float>(t.columns.1.x, t.columns.1.y, t.columns.1.z))
             windowPlane = (point: corner, normal: normal)
         } else {
-            // 2点目以降: 画面中央のレイ × 基準平面の交点。
+            // 2点目以降: 画面中央のレイ × 基準平面の交点を、窓枠の重力水平/鉛直へ拘束する。
             guard let plane = windowPlane,
                   let p = intersectRayWithBasePlane(arView, plane: plane) else {
                 showError(messageWallNotFound)
                 return
             }
-            corner = p
+            corner = snapWindowCorner(p, index: windowCorners.count)
         }
 
-        if let prev = windowCorners.last {
-            drawWindowLine(from: prev, to: corner)   // 直前の角と結ぶ辺
+        appendWindowCorner(corner)
+
+        // 3点目（右下）を置いた時点で左下は一意に決まる（左上の真下かつ右下と同じ下端）。自動生成して確定する。
+        if windowCorners.count == 3 {
+            appendWindowCorner(autoBottomLeft())
         }
-        if let marker = makeMarker(at: corner) { windowAnchors.append(marker) }
-        windowCorners.append(corner)
 
         if windowCorners.count == 4 {
             // 最後の辺（④→①）を閉じる。
@@ -551,6 +562,49 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         } else {
             windowState = .placing(windowCorners.count)
         }
+    }
+
+    /// 辺（直前の角と結ぶ）・マーカーを描き、角を配列に追加する。
+    private func appendWindowCorner(_ corner: SIMD3<Float>) {
+        if let prev = windowCorners.last {
+            drawWindowLine(from: prev, to: corner)
+        }
+        if let marker = makeMarker(at: corner) { windowAnchors.append(marker) }
+        windowCorners.append(corner)
+    }
+
+    /// 基準平面内の重力ベース軸（u=水平 / v=鉛直）。壁がほぼ水平で鉛直が取れない場合は nil。
+    private func windowAxes() -> (u: SIMD3<Float>, v: SIMD3<Float>)? {
+        guard let plane = windowPlane,
+              let axes = WindowCalculator.planeAxes(normal: SIMD3<Double>(plane.normal)) else { return nil }
+        return (SIMD3<Float>(axes.u), SIMD3<Float>(axes.v))
+    }
+
+    /// レイ×平面の生交点を窓枠の重力水平/鉛直へ拘束する。
+    /// index 1（右上）: 左上と同じ高さ＝左上を通る水平線上（横位置だけ可変）。
+    /// index 2（右下）: 右上の真下＝右上を通る鉛直線上（高さだけ可変）。
+    /// 軸が取れない場合は拘束せず生交点を返す。
+    private func snapWindowCorner(_ p: SIMD3<Float>, index: Int) -> SIMD3<Float> {
+        guard let axes = windowAxes() else { return p }
+        switch index {
+        case 1:
+            return projectOntoLine(p, origin: windowCorners[0], axis: axes.u)
+        case 2:
+            return projectOntoLine(p, origin: windowCorners[1], axis: axes.v)
+        default:
+            return p
+        }
+    }
+
+    /// 左下を算出する（左上の真下 かつ 右下と同じ下端）。
+    private func autoBottomLeft() -> SIMD3<Float> {
+        guard let axes = windowAxes() else { return windowCorners[0] }
+        return projectOntoLine(windowCorners[2], origin: windowCorners[0], axis: axes.v)
+    }
+
+    /// origin を通り axis 方向の直線上へ p を射影する（`WindowCalculator.projectOntoLine` の Float 版）。
+    private func projectOntoLine(_ p: SIMD3<Float>, origin: SIMD3<Float>, axis: SIMD3<Float>) -> SIMD3<Float> {
+        origin + simd_dot(p - origin, axis) * axis
     }
 
     /// 画面中央のレイと基準平面の交点を求める（壁ロック不要の角取得・レティクル表示に使う）。
@@ -580,16 +634,31 @@ final class MeasureViewModel: NSObject, ObservableObject, ARSessionDelegate {
         windowState = .done
     }
 
-    /// 直前に置いた角を1つ削除する（やり直し）。
+    /// 直前のユーザー操作を1つ取り消す（やり直し）。
     private func removeLastWindowCorner() {
         guard let arView, !windowCorners.isEmpty else { return }
-        // 直近に追加した「辺＋マーカー」を取り除く。確定（done）時は閉じ辺も1本余分にある。
-        let removeCount = (windowState == .done) ? 3 : (windowCorners.count >= 2 ? 2 : 1)
-        for _ in 0..<min(removeCount, windowAnchors.count) {
+        // 取り消す角の数と、それに伴うアンカー（辺＋マーカー）の数。
+        // 4点ある＝3点目（右下）配置で右下と左下(自動)＋閉じ辺まで入った状態。右下からやり直すため
+        // 右下・左下の2点と、辺TR-BR/BRマーカー/辺BR-BL/BLマーカー/閉じ辺の5アンカーを取り除く。
+        let removeCorners: Int
+        let removeAnchors: Int
+        if windowCorners.count == 4 {
+            removeCorners = 2
+            removeAnchors = 5
+        } else if windowCorners.count >= 2 {
+            removeCorners = 1
+            removeAnchors = 2   // 辺＋マーカー
+        } else {
+            removeCorners = 1
+            removeAnchors = 1   // マーカーのみ
+        }
+        for _ in 0..<min(removeAnchors, windowAnchors.count) {
             let anchor = windowAnchors.removeLast()
             arView.scene.removeAnchor(anchor)
         }
-        windowCorners.removeLast()
+        for _ in 0..<min(removeCorners, windowCorners.count) {
+            windowCorners.removeLast()
+        }
         if windowCorners.isEmpty { windowPlane = nil }   // 1点目を取り消したら基準平面も破棄
         windowResult = nil
         windowLabels = []
